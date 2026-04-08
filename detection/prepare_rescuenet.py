@@ -88,6 +88,25 @@ def download_dataset(output_dir: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# STEP 1B: RESOLVE DATASET ROOT
+# ---------------------------------------------------------------------------
+
+def resolve_dataset_root(dataset_path: Path) -> Path:
+    """
+    Navigate past a single-subfolder wrapper that kagglehub sometimes adds.
+    e.g. versions/1/RescueNet/ -> versions/1/RescueNet/ (not versions/1/)
+    Returns the first directory level that actually contains train/val/test splits.
+    """
+    subdirs = [d for d in dataset_path.iterdir() if d.is_dir()]
+    if len(subdirs) == 1:
+        candidate = subdirs[0]
+        if any((candidate / s).exists() for s in ["train", "val", "test"]):
+            print(f"      Resolved dataset root: {candidate}")
+            return candidate
+    return dataset_path
+
+
+# ---------------------------------------------------------------------------
 # STEP 2: INSPECT
 # ---------------------------------------------------------------------------
 
@@ -101,8 +120,13 @@ def inspect_dataset(dataset_path: Path):
 
     for split in splits:
         split_dir = dataset_path / split
-        img_dirs = list(split_dir.glob("**/images")) or list(split_dir.glob("**/img"))
-        lbl_dirs = list(split_dir.glob("**/labels")) or list(split_dir.glob("**/masks")) or list(split_dir.glob("**/label"))
+        img_dirs = (list(split_dir.glob("**/images")) or
+                    list(split_dir.glob("**/img")) or
+                    list(split_dir.glob("**/*-org-img")))
+        lbl_dirs = (list(split_dir.glob("**/labels")) or
+                    list(split_dir.glob("**/masks")) or
+                    list(split_dir.glob("**/label")) or
+                    list(split_dir.glob("**/*-label-img")))
 
         imgs = []
         for d in img_dirs:
@@ -114,9 +138,10 @@ def inspect_dataset(dataset_path: Path):
         print(f"      [{split}] images: {len(imgs)}, masks: {len(lbls)}")
 
     # Sample mask to show pixel value distribution
-    all_masks = list(dataset_path.glob("**/labels/*.png")) + \
-                list(dataset_path.glob("**/masks/*.png")) + \
-                list(dataset_path.glob("**/label/*.png"))
+    all_masks = (list(dataset_path.glob("**/labels/*.png")) +
+                 list(dataset_path.glob("**/masks/*.png")) +
+                 list(dataset_path.glob("**/label/*.png")) +
+                 list(dataset_path.glob("**/*-label-img/*.png")))
 
     if all_masks:
         print(f"\n      Sampling {min(50, len(all_masks))} masks for class distribution...")
@@ -169,11 +194,13 @@ def find_pairs(dataset_path: Path):
         # Find image and label dirs
         img_dir = None
         lbl_dir = None
-        for name in ["images", "img", "image", "train-org-img"]:
+        for name in ["images", "img", "image",
+                     "train-org-img", "val-org-img", "test-org-img"]:
             if (split_dir / name).exists():
                 img_dir = split_dir / name
                 break
-        for name in ["labels", "masks", "label", "mask", "train-label-img"]:
+        for name in ["labels", "masks", "label", "mask",
+                     "train-label-img", "val-label-img", "test-label-img"]:
             if (split_dir / name).exists():
                 lbl_dir = split_dir / name
                 break
@@ -188,11 +215,16 @@ def find_pairs(dataset_path: Path):
         split_pairs = []
         for img_path in imgs:
             stem = img_path.stem
-            # Try matching mask by same stem
-            for ext in [".png", ".PNG"]:
-                mask_path = lbl_dir / (stem + ext)
-                if mask_path.exists():
-                    split_pairs.append((img_path, mask_path))
+            # Try matching mask by same stem, then with common suffixes (_lab)
+            matched = False
+            for suffix in ["", "_lab"]:
+                for ext in [".png", ".PNG"]:
+                    mask_path = lbl_dir / (stem + suffix + ext)
+                    if mask_path.exists():
+                        split_pairs.append((img_path, mask_path))
+                        matched = True
+                        break
+                if matched:
                     break
 
         pairs[split] = split_pairs
@@ -307,6 +339,10 @@ def sample_pairs(pairs: dict, img_num: int | None) -> dict:
 
     # Compute split sizes proportional to the original distribution
     total_orig = sum(len(v) for v in pairs.values())
+    if total_orig == 0:
+        raise RuntimeError("No image-mask pairs found across any split. "
+                           "Check dataset structure and file naming.")
+
     sampled = {}
     remaining = img_num
 
@@ -468,8 +504,10 @@ def main():
     parser.add_argument("--dataset-path", type=str, default=None,
                         help="Path to already-downloaded RescueNet dataset. "
                              "If not set, will download via kagglehub.")
-    parser.add_argument("--output-dir", type=str, default="../data/rescuenet_yolo",
-                        help="Where to write the converted YOLO dataset (default: ../data/rescuenet_yolo)")
+    _default_output = str(Path(__file__).resolve().parent.parent / "data" / "rescuenet_yolo")
+    parser.add_argument("--output-dir", type=str, default=_default_output,
+                        help="Where to write the converted YOLO dataset "
+                             f"(default: <repo_root>/data/rescuenet_yolo)")
     parser.add_argument("--mode", choices=["detect", "segment"], default="detect",
                         help="detect = bounding boxes, segment = polygons (default: detect)")
     parser.add_argument("--tile", action="store_true", default=True,
@@ -502,6 +540,9 @@ def main():
     else:
         dataset_path = download_dataset(output_dir)
 
+    # Resolve past any single-subfolder wrapper (e.g. versions/1/RescueNet/)
+    dataset_path = resolve_dataset_root(dataset_path)
+
     # Step 2: Inspect
     inspect_dataset(dataset_path)
 
@@ -512,7 +553,7 @@ def main():
     # Step 3: Find pairs
     print("\n[2.5/5] Finding image-mask pairs...")
     pairs = find_pairs(dataset_path)
-    if not pairs:
+    if not pairs or not any(pairs.values()):
         raise RuntimeError("No image-mask pairs found. Check dataset structure.")
 
     # Step 4: Convert

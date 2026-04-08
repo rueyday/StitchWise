@@ -131,6 +131,10 @@ def validate_setup(data_yaml: Path, model_name: str):
     print(f"  classes    : {nc} → {names}")
 
     dataset_root = Path(cfg.get("path", data_yaml.parent))
+    if not dataset_root.exists():
+        # Absolute path is stale (dataset was moved) — fall back to yaml's own directory
+        dataset_root = data_yaml.parent
+        print(f"  WARNING: data.yaml 'path' not found; using yaml directory instead: {dataset_root}")
     all_splits_ok = True
     for split_key in ("train", "val", "test"):
         rel = cfg.get(split_key, "")
