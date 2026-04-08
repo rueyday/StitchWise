@@ -1,0 +1,38 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/
+build/
+dist/
+
+# --- Data (DO NOT PUSH RAW DATA) ---
+data/raw/
+data/processed/
+data/annotations/
+# Exceptions: you might want to keep the folder structure
+!data/processed/.gitkeep
+
+# --- Models & Weights ---
+*.pt
+*.pth
+runs/
+models/checkpoints/*
+# Keep the folder but ignore the large weights
+!models/checkpoints/.gitkeep
+
+# --- IDEs & OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Notebooks ---
+.ipynb_checkpoints
+
+# --- StitchWise Specific ---
+# Ignore the generated YAML if it contains absolute local paths
+data/processed/data.yaml

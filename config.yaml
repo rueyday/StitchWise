@@ -1,0 +1,49 @@
+# Project Configuration for StitchWise
+
+# Dataset Configuration
+dataset:
+  name: "RescueNet"
+  data_root: "./data/processed"
+  train_split: 0.8
+  val_split: 0.1
+  test_split: 0.1
+  img_size: 640  # YOLO input size
+
+# Model Configuration
+model:
+  architecture: "yolov8s-seg"  # Options: yolov8n/s/m/l/x-seg for segmentation
+  pretrained: true
+  device: "cuda"  # or "cpu"
+
+# Training Configuration
+training:
+  epochs: 100
+  batch_size: 16
+  learning_rate: 0.001
+  weight_decay: 0.0005
+  optimizer: "SGD"  # or "Adam"
+  patience: 20  # Early stopping patience
+  save_period: 10  # Save checkpoint every N epochs
+
+# Data Augmentation
+augmentation:
+  enabled: true
+  hsv_h: 0.015  # HSV-Hue augmentation
+  hsv_s: 0.7    # HSV-Saturation augmentation
+  hsv_v: 0.4    # HSV-Value augmentation
+  degrees: 10   # Rotation range
+  translate: 0.1  # Translation
+  scale: 0.5    # Scale augmentation
+  flipud: 0.5   # Vertical flip probability
+  fliplr: 0.5   # Horizontal flip probability
+
+# Logging
+logging:
+  log_level: "INFO"
+  save_dir: "./models/checkpoints"
+  log_file: "training.log"
+
+# Inference
+inference:
+  confidence_threshold: 0.5
+  iou_threshold: 0.45
