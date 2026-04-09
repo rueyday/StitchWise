@@ -23,6 +23,9 @@ detection/model/
 *.onnx
 *.engine
 
+# ...except the root weights folder
+!current_weights/*.pt
+
 # -----------------------------------------------------------------------------
 # Training outputs (logs, plots, weights written by YOLOv8)
 # -----------------------------------------------------------------------------
