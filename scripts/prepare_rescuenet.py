@@ -318,7 +318,6 @@ def convert_dataset(pairs: dict, output_dir: Path, mode: str = "detect",
                      img_num: int | None = None):
     """Convert all image/mask pairs to YOLO format."""
 
-    # Apply sampling BEFORE conversion so we only process what we need
     if img_num is not None:
         print(f"\n[3/5] Converting masks to YOLO {mode} format "
               f"(limited to {img_num} source images)...")
@@ -335,6 +334,8 @@ def convert_dataset(pairs: dict, output_dir: Path, mode: str = "detect",
     convert_fn = mask_to_yolo_detect if mode == "detect" else mask_to_yolo_segment
 
     stats = {"total_images": 0, "total_labels": 0, "skipped": 0}
+    # NEW: Track class distribution of saved labels
+    class_counts = {yolo_cls: 0 for yolo_cls in YOLO_CLASS_MAP.values()}
 
     for split, split_pairs in pairs.items():
         img_out = output_dir / split / "images"
@@ -356,17 +357,31 @@ def convert_dataset(pairs: dict, output_dir: Path, mode: str = "detect",
                 for tile_idx, (t_img, t_mask, _, _) in enumerate(
                         tile_image_and_mask(img, mask, tile_size)):
                     tile_name = f"{stem}_t{tile_idx:04d}"
+                    
+                    # --- Smart Tile Filtering ---
+                    water_ratio = np.sum(t_mask == 1) / t_mask.size
+                    has_rare_class = np.any(np.isin(t_mask, [4, 5, 7]))
+                    
+                    if water_ratio > 0.80 and not has_rare_class:
+                        if random.random() > 0.10: 
+                            continue # Drop 90% of redundant water tiles
+                    # ---------------------------------
+
                     lines = convert_fn(t_mask, t_img.shape[0], t_img.shape[1])
-                    # Only save tiles that have at least one label
+                    
                     if lines:
-                        # Save image and labels for tiles WITH objects
                         cv2.imwrite(str(img_out / f"{tile_name}.jpg"), t_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
                         with open(lbl_out / f"{tile_name}.txt", "w") as f:
                             f.write("\n".join(lines))
+                        
+                        # Update stats and class counts
                         stats["total_images"] += 1
                         stats["total_labels"] += len(lines)
+                        for line in lines:
+                            cls_id = int(line.split()[0])
+                            class_counts[cls_id] += 1
+                            
                     elif random.random() < 0.10:  # Keep ~10% of empty background tiles
-                        # Save image and an EMPTY label file for background tiles
                         cv2.imwrite(str(img_out / f"{tile_name}.jpg"), t_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
                         with open(lbl_out / f"{tile_name}.txt", "w") as f:
                             f.write("") # Empty file
@@ -374,19 +389,33 @@ def convert_dataset(pairs: dict, output_dir: Path, mode: str = "detect",
             else:
                 h, w = img.shape[:2]
                 lines = convert_fn(mask, h, w)
-                # Only save images that have at least one label
                 if lines:
-                    cv2.imwrite(str(img_out / f"{stem}.jpg"), img,
-                                [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    cv2.imwrite(str(img_out / f"{stem}.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, 95])
                     with open(lbl_out / f"{stem}.txt", "w") as f:
                         f.write("\n".join(lines))
+                    
                     stats["total_images"] += 1
                     stats["total_labels"] += len(lines)
+                    for line in lines:
+                        cls_id = int(line.split()[0])
+                        class_counts[cls_id] += 1
 
     print(f"\n      Conversion complete:")
     print(f"        Images written : {stats['total_images']}")
     print(f"        Label entries  : {stats['total_labels']}")
     print(f"        Skipped (bad)  : {stats['skipped']}")
+    
+    # NEW: Print the final YOLO class distribution
+    print(f"\n      Final YOLO Class Distribution (Object Counts):")
+    total_objects = sum(class_counts.values())
+    if total_objects > 0:
+        for yolo_cls, count in class_counts.items():
+            orig_cls = ACTIVE_CLASSES[yolo_cls]
+            name = CLASSES[orig_cls]
+            pct = (count / total_objects) * 100
+            print(f"        {yolo_cls} ({name:<26}): {count:<6} ({pct:.1f}%)")
+    else:
+        print("        No objects found in the sampled dataset.")
 
 
 # ---------------------------------------------------------------------------
@@ -455,7 +484,7 @@ def main():
     parser.add_argument("--dataset-path", type=str, default=None,
                         help="Path to already-downloaded RescueNet dataset. "
                              "If not set, will download via kagglehub.")
-    parser.add_argument("--output-dir", type=str, default="../data/processed",
+    parser.add_argument("--output-dir", type=str, default="data/processed",
                         help="Where to write the converted YOLO dataset (default: ../data/processed)")
     parser.add_argument("--mode", choices=["detect", "segment"], default="detect",
                         help="detect = bounding boxes, segment = polygons (default: detect)")
@@ -527,7 +556,7 @@ def main():
 ║                                                          ║
 ║  from ultralytics import YOLO                            ║
 ║  model = YOLO('yolov8m.pt')                              ║
-║  model.train(data='{yaml_path}',   ║
+║  model.train(data='{yaml_path}',            ║
 ║              epochs=50, imgsz=640, batch=16)             ║
 ╚══════════════════════════════════════════════════════════╝
 """)

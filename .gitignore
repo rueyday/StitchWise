@@ -36,3 +36,5 @@ Thumbs.db
 # --- StitchWise Specific ---
 # Ignore the generated YAML if it contains absolute local paths
 data/processed/data.yaml
+
+stitchwise.tar.gz
