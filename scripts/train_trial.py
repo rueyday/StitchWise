@@ -1,31 +1,14 @@
 from ultralytics import YOLO
-from pathlib import Path
 
-def train_trial():
-    # Make sure this points to your newly fixed directory!
-    data_yaml = Path("data/processed/data.yaml").resolve()
-    
-    # Using the Nano segmentation model for the fastest possible trial
-    model = YOLO("yolov8n-seg.pt")
+def train_production():
+    # 1. Load the partially trained model checkpoint
+    checkpoint_path = "runs/segment/models/checkpoints/rescuenet_seg_production3/weights/last.pt"
+    model = YOLO(checkpoint_path)
 
-    print("🚀 Starting 5-epoch trial run...")
+    print(f"🚀 Resuming Full Production Run from {checkpoint_path}...")
     
-    model.train(
-        data=str(data_yaml),
-        epochs=100,          # <-- TRIAL RUN: Just 5 epochs
-        imgsz=640,
-        batch=16,          # If you get a CUDA Out of Memory error, drop this to 8
-        device=0,
-        project="models/checkpoints",
-        name="rescuenet_seg_production",
-        save=True,
-        plots=True,
-        
-        # --- Handle False Positives (Shadows vs Water) ---
-        hsv_h=0.015,       # Alter colors to decouple "brown" from "muddy water"
-        hsv_s=0.7,         # Aggressive saturation shifts
-        hsv_v=0.4          # Aggressive brightness shifts
-    )
+    # 2. Resume training. YOLO automatically remembers your batch=32, workers=4, cache=False, etc.
+    model.train(resume=True)
 
 if __name__ == "__main__":
-    train_trial()
+    train_production()

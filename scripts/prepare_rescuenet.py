@@ -427,7 +427,7 @@ def generate_data_yaml(output_dir: Path, mode: str):
     print("\n[4/5] Generating data.yaml...")
 
     yaml_data = {
-        "path": str(output_dir.resolve()),
+        "path": "/home/kaichi/StitchWise/data/processed",
         "train": "train/images",
         "val":   "val/images",
         "test":  "test/images",
