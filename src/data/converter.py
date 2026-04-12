@@ -1,166 +1,133 @@
-"""Convert RescueNet annotations to YOLO format"""
+"""Mask-to-YOLO conversion and image tiling for RescueNet data preparation.
 
-import json
-import numpy as np
-import cv2
-from pathlib import Path
-from typing import List, Tuple, Optional
-from PIL import Image
-
-
-class RescueNetToYOLO:
-    """Converter for RescueNet annotations to YOLO format"""
-
-    # Damage classes mapping
-    DAMAGE_CLASSES = {
-        "No Damage": 0,
-        "Minor Damage": 1,
-        "Major Damage": 2,
-        "Destroyed": 3,
-    }
-
-    def __init__(self, output_format: str = "bbox"):
-        """
-        Initialize converter
-
-        Args:
-            output_format: "bbox" for bounding boxes, "segmentation" for masks
-        """
-        self.output_format = output_format
-
-    def convert_bbox_annotation(
-        self,
-        annotation: dict,
-        image_height: int,
-        image_width: int
-    ) -> List[str]:
-        """
-        Convert bounding box annotation to YOLO format (normalized)
-
-        YOLO format: <class_id> <x_center> <y_center> <width> <height>
-        All values normalized to [0, 1]
-
-        Args:
-            annotation: Annotation dict with bbox coordinates
-            image_height: Height of image
-            image_width: Width of image
-
-        Returns:
-            List of YOLO format strings
-        """
-        yolo_lines = []
-
-        # Example structure - adjust based on actual RescueNet annotations
-        if "bboxes" in annotation and annotation["bboxes"]:
-            for bbox, label in zip(annotation["bboxes"], annotation.get("labels", [])):
-                # Assume bbox is [x_min, y_min, x_max, y_max]
-                x_min, y_min, x_max, y_max = bbox
-
-                # Convert to center coordinates
-                x_center = (x_min + x_max) / 2.0
-                y_center = (y_min + y_max) / 2.0
-                width = x_max - x_min
-                height = y_max - y_min
-
-                # Normalize to [0, 1]
-                x_center /= image_width
-                y_center /= image_height
-                width /= image_width
-                height /= image_height
-
-                # Clamp values
-                x_center = max(0, min(1, x_center))
-                y_center = max(0, min(1, y_center))
-                width = max(0, min(1, width))
-                height = max(0, min(1, height))
-
-                class_id = self.DAMAGE_CLASSES.get(label, 0)
-                yolo_lines.append(
-                    f"{class_id} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}"
-                )
-
-        return yolo_lines
-
-    def convert_segmentation_annotation(
-        self,
-        annotation: dict,
-        image_height: int,
-        image_width: int
-    ) -> List[str]:
-        """
-        Convert segmentation mask to YOLO format (polygon)
-
-        YOLO format: <class_id> <x1> <y1> <x2> <y2> ... (normalized)
-
-        Args:
-            annotation: Annotation dict with segmentation mask
-            image_height: Height of image
-            image_width: Width of image
-
-        Returns:
-            List of YOLO format strings
-        """
-        yolo_lines = []
-
-        # Convert polygon/mask to normalized coordinates
-        if "masks" in annotation and annotation["masks"] is not None:
-            mask = annotation["masks"]
-            label = annotation.get("label", "No Damage")
-            class_id = self.DAMAGE_CLASSES.get(label, 0)
-
-            # Find contours from mask
-            contours, _ = cv2.findContours(
-                mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-            )
-
-            for contour in contours:
-                contour = contour.squeeze()
-                if len(contour.shape) < 2 or contour.shape[0] < 3:
-                    continue
-
-                # Normalize contour coordinates
-                normalized_contour = contour / np.array([image_width, image_height])
-                normalized_contour = np.clip(normalized_contour, 0, 1)
-
-                # Format as YOLO polygon
-                polygon_str = " ".join(
-                    f"{x:.6f} {y:.6f}"
-                    for x, y in normalized_contour
-                )
-                yolo_lines.append(f"{class_id} {polygon_str}")
-
-        return yolo_lines
-
-
-def create_yolo_dataset_yaml(
-    output_path: str,
-    train_dir: str,
-    val_dir: str,
-    num_classes: int = 4,
-    class_names: Optional[List[str]] = None
-) -> None:
-    """
-    Create data.yaml file for YOLO training
-
-    Args:
-        output_path: Path to save data.yaml
-        train_dir: Path to training images
-        val_dir: Path to validation images
-        num_classes: Number of damage classes
-        class_names: List of class names
-    """
-    if class_names is None:
-        class_names = list(RescueNetToYOLO.DAMAGE_CLASSES.keys())
-
-    yaml_content = f"""# RescueNet YOLO Dataset Configuration
-path: {Path(train_dir).parent}
-train: {Path(train_dir).name}
-val: {Path(val_dir).name}
-
-nc: {num_classes}
-names: {class_names}
+These are the core data processing primitives called by scripts/prepare_data.py.
+All class-mapping logic is driven by the caller (via yolo_class_map), keeping
+these functions independent of any specific active_classes configuration.
 """
 
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w") as f:
-        f.write(yaml_content)
+from typing import Generator
+
+import cv2
+import numpy as np
+
+from src.utils.classes import RESCUENET_CLASSES
+
+
+def build_yolo_class_map(active_classes: list) -> dict:
+    """Return a RescueNet pixel-value → YOLO-index mapping for conversion functions.
+
+    Args:
+        active_classes: Ordered list of RescueNet pixel values, e.g. [1, 4, 5, 7, 8].
+                        Read from config.yaml data_preparation.active_classes.
+
+    Returns:
+        Dict mapping original pixel value to YOLO 0-based index.
+    """
+    return {orig: yolo for yolo, orig in enumerate(active_classes)}
+
+
+def mask_to_yolo_detect(
+    mask: np.ndarray,
+    img_h: int,
+    img_w: int,
+    yolo_class_map: dict,
+    min_contour_area: int = 500,
+) -> list:
+    """Convert a grayscale segmentation mask to YOLO detection format lines.
+
+    Args:
+        mask: Grayscale mask array with RescueNet pixel values.
+        img_h: Image height in pixels.
+        img_w: Image width in pixels.
+        yolo_class_map: Dict mapping RescueNet pixel value → YOLO class index.
+                        Build with build_yolo_class_map(active_classes).
+        min_contour_area: Minimum contour area (px²) to filter noise.
+
+    Returns:
+        List of strings in "class_id cx cy w h" format (values normalized 0-1).
+    """
+    lines = []
+    for orig_cls, yolo_cls in yolo_class_map.items():
+        binary = (mask == orig_cls).astype(np.uint8)
+        if binary.sum() == 0:
+            continue
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in contours:
+            if cv2.contourArea(cnt) < min_contour_area:
+                continue
+            x, y, w, h = cv2.boundingRect(cnt)
+            cx = min(max((x + w / 2) / img_w, 0.0), 1.0)
+            cy = min(max((y + h / 2) / img_h, 0.0), 1.0)
+            nw = min(max(w / img_w, 0.0), 1.0)
+            nh = min(max(h / img_h, 0.0), 1.0)
+            if nw > 0 and nh > 0:
+                lines.append(f"{yolo_cls} {cx:.6f} {cy:.6f} {nw:.6f} {nh:.6f}")
+    return lines
+
+
+def mask_to_yolo_segment(
+    mask: np.ndarray,
+    img_h: int,
+    img_w: int,
+    yolo_class_map: dict,
+    min_contour_area: int = 500,
+) -> list:
+    """Convert a grayscale segmentation mask to YOLO segmentation format lines.
+
+    Args:
+        mask: Grayscale mask array with RescueNet pixel values.
+        img_h: Image height in pixels.
+        img_w: Image width in pixels.
+        yolo_class_map: Dict mapping RescueNet pixel value → YOLO class index.
+        min_contour_area: Minimum contour area (px²) to filter noise.
+
+    Returns:
+        List of strings in "class_id x1 y1 x2 y2 ..." format (normalized polygon).
+    """
+    lines = []
+    for orig_cls, yolo_cls in yolo_class_map.items():
+        binary = (mask == orig_cls).astype(np.uint8)
+        if binary.sum() == 0:
+            continue
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in contours:
+            if cv2.contourArea(cnt) < min_contour_area:
+                continue
+            epsilon = 0.005 * cv2.arcLength(cnt, True)
+            approx = cv2.approxPolyDP(cnt, epsilon, True)
+            if len(approx) < 3:
+                continue
+            pts = approx.reshape(-1, 2)
+            coords = [f"{px / img_w:.6f} {py / img_h:.6f}" for px, py in pts]
+            lines.append(f"{yolo_cls} " + " ".join(coords))
+    return lines
+
+
+def tile_image_and_mask(
+    img: np.ndarray,
+    mask: np.ndarray,
+    tile_size: int,
+    overlap: int = 64,
+) -> Generator:
+    """Yield (tile_img, tile_mask, x_offset, y_offset) patches from a large image.
+
+    Args:
+        img: Full-resolution image array (H x W x C).
+        mask: Corresponding grayscale mask array (H x W).
+        tile_size: Side length of each square tile in pixels.
+        overlap: Pixel overlap between adjacent tiles to avoid border artifacts.
+
+    Yields:
+        Tuples of (tile_img, tile_mask, x1, y1).
+    """
+    if overlap >= tile_size:
+        raise ValueError(f"overlap ({overlap}) must be less than tile_size ({tile_size})")
+    h, w = img.shape[:2]
+    stride = tile_size - overlap
+    for y in range(0, h, stride):
+        for x in range(0, w, stride):
+            y2 = min(y + tile_size, h)
+            x2 = min(x + tile_size, w)
+            y1 = max(0, y2 - tile_size)
+            x1 = max(0, x2 - tile_size)
+            yield img[y1:y2, x1:x2], mask[y1:y2, x1:x2], x1, y1

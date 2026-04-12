@@ -1,0 +1,4 @@
+2026-04-11 23:28:04 | INFO     | __main__:main:68 - Model info: {'name': 'yolov8n-seg', 'device': 'cuda', 'parameters': 3409968}
+2026-04-11 23:29:53 | INFO     | __main__:main:68 - Model info: {'name': 'yolov8n-seg', 'device': 'cuda', 'parameters': 3409968}
+2026-04-11 23:30:10 | INFO     | __main__:main:68 - Model info: {'name': 'yolov8n-seg', 'device': 'cuda', 'parameters': 3409968}
+2026-04-11 23:33:01 | INFO     | __main__:main:85 - Training complete.

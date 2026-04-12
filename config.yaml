@@ -1,49 +1,57 @@
 # Project Configuration for StitchWise
+# Single source of truth for all pipeline parameters.
+# All scripts read this file — edit here, not in individual scripts.
 
-# Dataset Configuration
 dataset:
   name: "RescueNet"
-  data_root: "./data/processed"
-  train_split: 0.8
-  val_split: 0.1
-  test_split: 0.1
+  data_root: "data/processed"
   img_size: 640  # YOLO input size
 
-# Model Configuration
 model:
-  architecture: "yolov8s-seg"  # Options: yolov8n/s/m/l/x-seg for segmentation
+  name: "rescuenet_seg"              # Run name used for checkpoint directory
+  architecture: "yolov8n-seg"        # Options: yolov8n/s/m/l/x-seg
   pretrained: true
-  device: "cuda"  # or "cpu"
+  device: "cuda"                     # or "cpu"
 
-# Training Configuration
 training:
-  epochs: 100
+  epochs: 20
   batch_size: 16
   learning_rate: 0.001
   weight_decay: 0.0005
-  optimizer: "SGD"  # or "Adam"
-  patience: 20  # Early stopping patience
-  save_period: 10  # Save checkpoint every N epochs
+  optimizer: "SGD"                   # or "Adam"
+  patience: 20                       # Early stopping patience
+  save_period: 10                    # Save checkpoint every N epochs
 
-# Data Augmentation
 augmentation:
   enabled: true
   hsv_h: 0.015  # HSV-Hue augmentation
-  hsv_s: 0.7    # HSV-Saturation augmentation
-  hsv_v: 0.4    # HSV-Value augmentation
+  hsv_s: 0.7    # HSV-Saturation augmentation (aggressive to decouple color features)
+  hsv_v: 0.4    # HSV-Value augmentation (aggressive to prevent shadow confusion)
   degrees: 10   # Rotation range
-  translate: 0.1  # Translation
-  scale: 0.5    # Scale augmentation
+  translate: 0.1
+  scale: 0.5
   flipud: 0.5   # Vertical flip probability
   fliplr: 0.5   # Horizontal flip probability
 
-# Logging
+# Data preparation settings for scripts/prepare_data.py.
+# active_classes: RescueNet pixel values to include as YOLO classes (background=0 excluded).
+# IMPORTANT: If you change active_classes, also update CLASS_COLORS in src/utils/classes.py
+#            and retrain the model — the class mapping is baked into the weights.
+data_preparation:
+  active_classes: [1, 4, 5, 7, 8]    # water, major-damage, total-destruction, road-blocked, vehicle
+  min_contour_area: 500              # Filter contours smaller than this (pixels) as noise
+  tile_size: 640                     # Tile side length in pixels
+  tile_overlap: 64                   # Pixel overlap between adjacent tiles
+  water_dropout_ratio: 0.90          # Drop this fraction of water-dominant tiles (class balance)
+  background_keep_ratio: 0.10        # Keep this fraction of empty tiles as negative examples
+  img_num: 20                        # Source images to sample; 0 = full dataset
+
 logging:
   log_level: "INFO"
-  save_dir: "./models/checkpoints"
+  save_dir: "models/checkpoints"
   log_file: "training.log"
 
-# Inference
 inference:
+  model_path: "models/checkpoints/rescuenet_seg/weights/best.pt"
   confidence_threshold: 0.5
   iou_threshold: 0.45

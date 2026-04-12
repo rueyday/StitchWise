@@ -9,31 +9,19 @@ venv/
 build/
 dist/
 
-# --- Data (DO NOT PUSH RAW DATA) ---
-data/raw/
-data/processed/
-data/annotations/
-# Exceptions: you might want to keep the folder structure
-!data/processed/.gitkeep
+# --- Data ---
+data/
 
 # --- Models & Weights ---
 *.pth
 runs/
-models/checkpoints/*
-# Keep the folder but ignore the large weights
-!models/checkpoints/.gitkeep
+
+models/checkpoints/rescuenet_seg/*
+!models/checkpoints/rescuenet_seg/.gitkeep
+!models/checkpoints/rescuenet_seg/weights/
 
 # --- IDEs & OS ---
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
-
-# --- Notebooks ---
-.ipynb_checkpoints
-
-# --- StitchWise Specific ---
-# Ignore the generated YAML if it contains absolute local paths
-data/processed/data.yaml
-
-stitchwise.tar.gz

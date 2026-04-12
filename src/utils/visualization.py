@@ -1,131 +1,121 @@
-"""Visualization utilities for damage detection results"""
+"""Visualization utilities for damage detection results."""
+
+from pathlib import Path
+from typing import Optional
 
 import cv2
-import numpy as np
 import matplotlib.pyplot as plt
-from typing import List, Optional, Tuple
-from pathlib import Path
+import numpy as np
+
+from src.utils.classes import CLASS_COLORS, build_class_map
 
 
 class Visualizer:
-    """Visualization utilities for detection and segmentation results"""
-
-    DAMAGE_COLORS = {
-        0: (0, 255, 0),        # No Damage - Green
-        1: (0, 165, 255),      # Minor Damage - Orange
-        2: (0, 0, 255),        # Major Damage - Red
-        3: (128, 0, 128),      # Destroyed - Purple
-    }
-
-    CLASS_NAMES = {
-        0: "No Damage",
-        1: "Minor Damage",
-        2: "Major Damage",
-        3: "Destroyed",
-    }
+    """Visualization utilities for detection and segmentation results."""
 
     @staticmethod
     def draw_bboxes(
         image: np.ndarray,
-        bboxes: List[Tuple],
-        class_ids: List[int],
-        confidences: Optional[List[float]] = None,
-        thickness: int = 2
+        bboxes: list,
+        class_ids: list,
+        confidences: Optional[list] = None,
+        class_map: Optional[dict] = None,
+        thickness: int = 2,
     ) -> np.ndarray:
-        """
-        Draw bounding boxes on image
+        """Draw bounding boxes on an image.
 
         Args:
-            image: Input image (BGR)
-            bboxes: List of bounding boxes [(x1, y1, x2, y2), ...]
-            class_ids: List of class IDs
-            confidences: Optional list of confidence scores
-            thickness: Line thickness
+            image: Input image (BGR).
+            bboxes: List of bounding boxes as (x1, y1, x2, y2) arrays or tuples.
+            class_ids: List of integer YOLO class IDs.
+            confidences: Optional list of confidence scores.
+            class_map: Optional dict mapping class ID → name (from build_class_map).
+                       If None, class IDs are used as labels.
+            thickness: Rectangle line thickness.
 
         Returns:
-            Image with drawn bboxes
+            Image copy with drawn boxes and labels.
         """
         output = image.copy()
-
         for i, (bbox, class_id) in enumerate(zip(bboxes, class_ids)):
             x1, y1, x2, y2 = map(int, bbox)
-            color = Visualizer.DAMAGE_COLORS.get(class_id, (255, 255, 255))
-            label = Visualizer.CLASS_NAMES.get(class_id, "Unknown")
-
-            # Draw rectangle
-            cv2.rectangle(output, (x1, y1), (x2, y2), color, thickness)
-
-            # Draw label
+            color = CLASS_COLORS.get(class_id, (255, 255, 255))
+            label = class_map.get(class_id, str(class_id)) if class_map else str(class_id)
             conf_text = f" {confidences[i]:.2f}" if confidences else ""
-            text = f"{label}{conf_text}"
+            cv2.rectangle(output, (x1, y1), (x2, y2), color, thickness)
             cv2.putText(
                 output,
-                text,
+                f"{label}{conf_text}",
                 (x1, y1 - 10),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
                 color,
-                2
+                2,
             )
-
         return output
 
     @staticmethod
     def draw_masks(
         image: np.ndarray,
-        masks: List[np.ndarray],
-        class_ids: List[int],
-        alpha: float = 0.3
+        masks: list,
+        class_ids: list,
+        alpha: float = 0.35,
     ) -> np.ndarray:
-        """
-        Draw segmentation masks on image
+        """Overlay segmentation masks on an image.
 
         Args:
-            image: Input image (BGR)
-            masks: List of binary masks
-            class_ids: List of class IDs
-            alpha: Transparency coefficient
+            image: Input image (BGR).
+            masks: List of 2-D binary or float mask arrays (H x W).
+            class_ids: List of integer YOLO class IDs.
+            alpha: Mask transparency (0 = invisible, 1 = opaque).
 
         Returns:
-            Image with drawn masks
+            Image copy with blended mask overlays.
         """
         output = image.copy()
-
         for mask, class_id in zip(masks, class_ids):
-            color = Visualizer.DAMAGE_COLORS.get(class_id, (255, 255, 255))
-
-            # Create colored mask
+            color = CLASS_COLORS.get(class_id, (255, 255, 255))
             colored_mask = np.zeros_like(image)
             colored_mask[mask > 0] = color
-
-            # Blend mask with image
             output = cv2.addWeighted(output, 1 - alpha, colored_mask, alpha, 0)
-
         return output
 
     @staticmethod
     def plot_predictions(
         image: np.ndarray,
         results,
-        save_path: Optional[str] = None
+        class_map: Optional[dict] = None,
+        save_path: Optional[str] = None,
     ) -> None:
-        """
-        Plot detection/segmentation results
+        """Plot detection and segmentation results using matplotlib.
 
         Args:
-            image: Input image
-            results: YOLO results object
-            save_path: Optional path to save figure
+            image: Input image (BGR).
+            results: Single ultralytics YOLO result object (results[0]).
+            class_map: Optional dict mapping class ID → name.
+            save_path: If given, save the figure here instead of showing it.
         """
+        annotated = image.copy()
+
+        if results.boxes and len(results.boxes):
+            bboxes = [box.xyxy[0].cpu().numpy() for box in results.boxes]
+            class_ids = [int(box.cls[0]) for box in results.boxes]
+            confs = [float(box.conf[0]) for box in results.boxes]
+            annotated = Visualizer.draw_bboxes(annotated, bboxes, class_ids, confs, class_map)
+
+        if results.masks is not None:
+            masks_np = results.masks.data.cpu().numpy()  # (N, H, W)
+            class_ids = [int(box.cls[0]) for box in results.boxes]
+            # Resize each mask to match the original image dimensions
+            h, w = image.shape[:2]
+            resized = [
+                cv2.resize(masks_np[j], (w, h), interpolation=cv2.INTER_NEAREST)
+                for j in range(len(masks_np))
+            ]
+            annotated = Visualizer.draw_masks(annotated, resized, class_ids)
+
         fig, ax = plt.subplots(figsize=(12, 8))
-
-        # Convert BGR to RGB for display
-        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        ax.imshow(image_rgb)
-
-        # TODO: Extract and plot bboxes/masks from results
-        # This depends on YOLO results format
-
+        ax.imshow(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB))
         ax.set_title("Damage Detection Results")
         ax.axis("off")
 
@@ -134,14 +124,15 @@ class Visualizer:
             plt.savefig(save_path, bbox_inches="tight", dpi=150)
         else:
             plt.show()
-
         plt.close()
 
     @staticmethod
-    def save_result_image(
-        image: np.ndarray,
-        output_path: str
-    ) -> None:
-        """Save result image"""
+    def save_result_image(image: np.ndarray, output_path: str) -> None:
+        """Save an annotated result image to disk.
+
+        Args:
+            image: Annotated image array (BGR).
+            output_path: Destination file path.
+        """
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(output_path, image)
