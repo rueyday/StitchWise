@@ -17,7 +17,6 @@ data/annotations/
 !data/processed/.gitkeep
 
 # --- Models & Weights ---
-*.pt
 *.pth
 runs/
 models/checkpoints/*
