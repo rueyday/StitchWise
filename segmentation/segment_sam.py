@@ -8,8 +8,8 @@ This script implements Path 2 of the pipeline:
   4. Saves visualizations and raw binary masks for downstream processing.
 
 Usage:
-    python segment_with_sam.py --source data/rescuenet_yolo/test/images/sample.jpg
-    python segment_with_sam.py --source dir_of_images/ --conf 0.4
+    python segment_sam.py --source data/rescuenet_yolo/test/images/sample.jpg
+    python segment_sam.py --source dir_of_images/ --conf 0.4
 
 Requirements:
     pip install ultralytics opencv-python-headless numpy
@@ -26,7 +26,7 @@ from ultralytics import YOLO, SAM
 # ---------------------------------------------------------------------------
 SCRIPT_DIR = Path(__file__).parent.resolve()
 REPO_ROOT  = SCRIPT_DIR.parent
-DEFAULT_YOLO_WEIGHTS = REPO_ROOT / "outputs" / "runs" / "rescuenet_detect" / "weights" / "best.pt"
+DEFAULT_YOLO_WEIGHTS = REPO_ROOT / "detection" / "model" / "best.pt"
 OUTPUT_DIR = REPO_ROOT / "outputs" / "runs" / "sam_segmentation"
 
 def parse_args():
