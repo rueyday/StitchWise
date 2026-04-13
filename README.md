@@ -6,6 +6,14 @@ StitchWise is a two-component pipeline for post-disaster aerial analysis:
 1. **Stitching** — reconstructs georeferenced orthomosaics from overlapping UAV frames (teammates' component)
 2. **Detection** — fine-tunes YOLOv8 on RescueNet to locate water, structural damage, blocked roads, and vehicles in tiled aerial imagery
 
+The two components meet at `predict.py`: the stitching pipeline writes an orthomosaic to `outputs/orthomosaics/`, and `predict.py` reads it, runs tiled inference across the full image, and writes an annotated damage map to `outputs/detections/`.
+
+```
+prepare_rescuenet.py → train.py → evaluate.py → predict.py
+                                                      ↑
+                               stitching pipeline outputs orthomosaic here
+```
+
 This README covers the detection component end-to-end.
 
 ---
@@ -18,7 +26,7 @@ StitchWise/
 │   ├── prepare_rescuenet.py   # download + convert RescueNet → YOLO format
 │   ├── train.py               # two-phase YOLOv8 fine-tuning
 │   ├── evaluate.py            # test-split evaluation + per-class metrics
-│   ├── predict.py             # (not yet written) inference on arbitrary images
+│   ├── predict.py             # tiled inference on orthomosaics → annotated damage map
 │   ├── model/                 # gitignored — place downloaded weights here
 │   └── configs/               # YAML configs for different training experiments
 ├── shared/                    # utilities shared across both pipeline components
@@ -30,11 +38,13 @@ StitchWise/
 │       ├── test/
 │       └── data.yaml
 └── outputs/                   # gitignored
-    └── runs/                  # Ultralytics training and eval outputs
-        └── rescuenet_detect/
-            └── weights/
-                ├── best.pt
-                └── last.pt
+    ├── runs/                  # Ultralytics training and eval outputs
+    │   └── rescuenet_v2/      # recommended weights for inference
+    │       └── weights/
+    │           ├── best.pt
+    │           └── last.pt
+    ├── orthomosaics/          # input: stitched orthomosaics from stitching pipeline
+    └── detections/            # output: annotated damage maps from predict.py
 ```
 
 ---
@@ -237,10 +247,52 @@ Key flags:
 
 ---
 
+### Step 4 — Run inference
+
+Takes a stitched orthomosaic from the stitching pipeline (or any aerial image) and produces an annotated damage map. Tiled inference handles arbitrarily large inputs; cross-tile NMS removes duplicate detections at tile borders.
+
+**Basic run on an orthomosaic:**
+
+```bash
+python detection/predict.py --input outputs/orthomosaics/scene_01.jpg
+```
+
+**Lower confidence threshold (more detections, more false positives):**
+
+```bash
+python detection/predict.py --input outputs/orthomosaics/scene_01.jpg --conf 0.15
+```
+
+**Save individual annotated tiles for debugging tile coverage:**
+
+```bash
+python detection/predict.py --input outputs/orthomosaics/scene_01.jpg --save-tiles
+```
+
+Output is written to `outputs/detections/{input_stem}_detections.jpg`. With `--save-tiles`, individual annotated tiles are also saved under `outputs/detections/tiles/`.
+
+Key flags:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--input` | *(required)* | Path to the input orthomosaic image |
+| `--weights` | `outputs/runs/rescuenet_v2/weights/best.pt` | Checkpoint to use for inference |
+| `--conf` | `0.25` | Confidence threshold |
+| `--iou` | `0.6` | IoU threshold for NMS |
+| `--tile-size` | `640` | Inference tile size in pixels |
+| `--overlap` | `64` | Tile overlap in pixels |
+| `--save-tiles` | off | Save annotated tiles to `outputs/detections/tiles/` |
+| `--no-merge` | off | Skip cross-tile NMS (keeps all raw tile detections) |
+
+---
+
 ## Design decisions
 
 ### Tiling strategy
 Source images are 3000 × 4000 px — far too large for standard YOLO input. Tiling into 640 × 640 patches with 64 px overlap serves two purposes: it brings image resolution into YOLO's native operating range and multiplies effective dataset size (~20× per source image). Only tiles that contain at least one labeled object are saved, which avoids flooding training with background-only patches.
+
+### Tiled inference
+Orthomosaics stitched from multiple UAV frames can be thousands of pixels wide — far too large to feed into YOLOv8 in one shot. `predict.py` slices the orthomosaic into overlapping 640 × 640 px tiles (the same size the model was trained on), runs inference on each tile independently, then converts tile-local box coordinates back to full-image coordinates. A final round of per-class NMS across the whole image removes duplicate detections that arise wherever adjacent tiles overlap — `torchvision.ops.batched_nms` is used here, which suppresses only within the same class, matching the semantics of Ultralytics' per-tile NMS. The `--overlap` value (default 64 px) controls how much tiles share; increasing it reduces missed objects at borders at the cost of more duplicate candidates for NMS to resolve.
 
 ### Aerial augmentation
 Standard YOLO augmentations are tuned for street-level imagery. For nadir (straight-down) drone footage:
@@ -272,6 +324,8 @@ or pass the path explicitly:
 ```bash
 python detection/evaluate.py --weights detection/model/best.pt
 ```
+
+**Recommended weights for inference:** `outputs/runs/rescuenet_v2/weights/best.pt` — this is the default used by `predict.py`. If you place the weights file at that path, `predict.py` will find it automatically with no extra flags required.
 
 ---
 
