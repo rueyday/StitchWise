@@ -1,0 +1,25 @@
+# ── Core image processing ──────────────────────────────────────────────────
+numpy>=1.24
+opencv-python>=4.8
+PyYAML>=6.0
+Pillow>=10.0
+
+# ── Metric Scale (main branch) ────────────────────────────────────────────
+exifread>=3.0
+huggingface_hub>=0.20
+torch>=2.0
+transformers>=4.38
+matplotlib>=3.7
+
+# ── Detection + Segmentation ──────────────────────────────────────────────
+ultralytics>=8.1       # YOLO + SAM wrapper
+
+# ── GUI ───────────────────────────────────────────────────────────────────
+streamlit>=1.33
+plotly>=5.18
+pandas>=2.0
+streamlit-plotly-events>=0.0.6   # click-to-measure on mosaic
+
+# ── Optional (faster training / inference) ────────────────────────────────
+# tqdm
+# kagglehub  # only needed if retraining on RescueNet

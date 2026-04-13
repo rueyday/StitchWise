@@ -1,0 +1,27 @@
+paths:
+  data_dir: "data/aerial234"
+  output_dir: "outputs/pairwise"
+
+pair:
+  image1: "001.JPG"
+  image2: "002.JPG"
+
+preprocess:
+  resize_max_dim: 1600
+
+features:
+  type: "sift"
+  sift_nfeatures: 4000
+
+matching:
+  knn_k: 2
+  ratio_test: 0.75
+
+geometry:
+  ransac_reproj_threshold: 4.0
+  ransac_confidence: 0.995
+  ransac_max_iters: 5000
+  min_inliers: 20
+
+debug:
+  max_draw_matches: 200

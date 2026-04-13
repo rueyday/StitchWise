@@ -1,2 +1,7 @@
 /data
 /results
+/outputs
+/uploads
+__pycache__/
+*.pyc
+*.pt
