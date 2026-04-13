@@ -257,7 +257,9 @@ if st.session_state.running:
     st.stop()
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_mosaic, tab_images, tab_stats = st.tabs(["🗺️ Mosaic", "🖼️ Per Image", "📊 GSD Stats"])
+tab_mosaic, tab_stitch, tab_images, tab_stats = st.tabs(
+    ["🗺️ Mosaic", "🎬 Live Stitching", "🖼️ Per Image", "📊 GSD Stats"]
+)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -401,7 +403,86 @@ with tab_mosaic:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  TAB 2 — Per-image browser
+#  TAB 2 — Live stitching playback
+# ════════════════════════════════════════════════════════════════════════════
+with tab_stitch:
+    st.header("Live Stitching Playback")
+    st.caption(
+        "Watch the mosaic grow image-by-image. "
+        "The green outline shows the newly added frame at each step."
+    )
+
+    frame_paths: list[str] = result.get("stitch_frames", [])
+
+    # Back-compat: scan frames dir if summary predates this feature
+    if not frame_paths:
+        frames_dir = Path(result.get("poses_path", "")).parent.parent / "stitch_frames"
+        if frames_dir.exists():
+            frame_paths = sorted(str(p) for p in frames_dir.glob("frame_*.jpg"))
+
+    if not frame_paths:
+        st.info(
+            "No stitching frames found. Re-run the pipeline to generate them "
+            "(they are created automatically after stitching)."
+        )
+    else:
+        n_frames = len(frame_paths)
+
+        # ── Controls ──────────────────────────────────────────────────
+        ctrl_col, speed_col, _ = st.columns([2, 1, 3])
+        autoplay = ctrl_col.toggle("▶ Auto-play", value=False, key="autoplay")
+        fps = speed_col.select_slider(
+            "Speed", options=[0.5, 1, 2, 4, 8], value=2, key="anim_fps",
+            format_func=lambda v: f"{v} fps",
+        )
+
+        # Frame index stored in session state
+        if "frame_idx" not in st.session_state:
+            st.session_state.frame_idx = 0
+        idx = st.session_state.frame_idx
+
+        # Manual scrub slider
+        idx = st.slider("Frame", 0, n_frames - 1, idx, key="frame_slider",
+                         format=f"Image %d / {n_frames}")
+        st.session_state.frame_idx = idx
+
+        # ── Image display ─────────────────────────────────────────────
+        frame_img = cv2_read_rgb(frame_paths[idx])
+        if frame_img is not None:
+            img_placeholder = st.empty()
+            img_placeholder.image(frame_img, use_container_width=True)
+        else:
+            st.warning(f"Could not load frame {idx}")
+
+        # Manual step buttons
+        b1, b2, b3, b4 = st.columns(4)
+        if b1.button("⏮ First"):
+            st.session_state.frame_idx = 0
+            st.rerun()
+        if b2.button("◀ Prev") and idx > 0:
+            st.session_state.frame_idx = idx - 1
+            st.rerun()
+        if b3.button("Next ▶") and idx < n_frames - 1:
+            st.session_state.frame_idx = idx + 1
+            st.rerun()
+        if b4.button("Last ⏭"):
+            st.session_state.frame_idx = n_frames - 1
+            st.rerun()
+
+        # ── Auto-play loop ────────────────────────────────────────────
+        if autoplay:
+            import time
+            delay = 1.0 / fps
+            next_idx = (idx + 1) % n_frames
+            time.sleep(delay)
+            st.session_state.frame_idx = next_idx
+            st.rerun()
+
+        st.caption(f"Frame {idx + 1} of {n_frames}  ·  {Path(frame_paths[idx]).stem}")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  TAB 3 — Per-image browser
 # ════════════════════════════════════════════════════════════════════════════
 with tab_images:
     st.header("Per-Image Results")
@@ -477,7 +558,7 @@ with tab_images:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  TAB 3 — GSD Statistics
+#  TAB 4 — GSD Statistics
 # ════════════════════════════════════════════════════════════════════════════
 with tab_stats:
     st.header("GSD Statistics")

@@ -182,6 +182,122 @@ def run_stitching(
     )
 
 
+# ── Stage 3b — Progressive stitching frames ───────────────────────────────
+
+def render_stitching_frames(
+    image_dir: Path,
+    poses_path: Path,
+    manifest_path: Path,
+    frames_dir: Path,
+    preview_max_side: int = 900,
+) -> list[Path]:
+    """
+    Re-render the mosaic incrementally, saving one JPEG after each image
+    is added.  Returns the list of frame paths in order.
+
+    These frames power the "live stitching" playback in the GUI.
+    """
+    import sys as _sys
+    _sys.path.insert(0, str(PROJECT_ROOT / "src"))
+    from stitchwise.config import load_config
+    from stitchwise.io_utils import load_image, resolve_image_path, resize_by_max_dim
+
+    frames_dir.mkdir(parents=True, exist_ok=True)
+
+    with poses_path.open() as f:
+        poses_payload = json.load(f)
+    with manifest_path.open() as f:
+        manifest = json.load(f)
+
+    cfg = load_config(PROJECT_ROOT / "configs" / "stitching.yaml")
+    cfg.data_dir = str(image_dir)
+
+    nodes: list[dict] = poses_payload.get("nodes", [])
+    render_scale: float = float(manifest.get("render_scale", 1.0))
+    final_w: int = int(manifest.get("final_canvas_width", 1))
+    final_h: int = int(manifest.get("final_canvas_height", 1))
+
+    x_min, y_min = _compute_global_offset(nodes)
+    T = np.array([
+        [render_scale, 0.0, -x_min * render_scale],
+        [0.0, render_scale, -y_min * render_scale],
+        [0.0, 0.0, 1.0],
+    ], dtype=np.float64)
+
+    nodes_sorted = sorted(nodes, key=lambda n: _parse_index_key(str(n.get("image", ""))))
+
+    accum = np.zeros((final_h, final_w, 3), dtype=np.float32)
+    weights = np.zeros((final_h, final_w), dtype=np.float32)
+    frame_paths: list[Path] = []
+
+    for i, n in enumerate(nodes_sorted, start=1):
+        image_name = str(n.get("image", ""))
+        shape = n.get("image_processed_shape")
+        h_to_anchor = n.get("H_to_anchor")
+        if not image_name or shape is None or h_to_anchor is None:
+            continue
+
+        try:
+            image_path = resolve_image_path(image_name, cfg.data_dir)
+            img = load_image(image_path)
+            img_proc, _ = resize_by_max_dim(img, cfg.resize_max_dim)
+            th, tw = int(shape[0]), int(shape[1])
+            if img_proc.shape[0] != th or img_proc.shape[1] != tw:
+                img_proc = cv2.resize(img_proc, (tw, th), interpolation=cv2.INTER_AREA)
+
+            H = np.array(h_to_anchor, dtype=np.float64)
+            warp_mat = T @ H
+            warped = cv2.warpPerspective(img_proc, warp_mat, (final_w, final_h), flags=cv2.INTER_LINEAR)
+            src_mask = np.ones((img_proc.shape[0], img_proc.shape[1]), dtype=np.uint8) * 255
+            warped_mask = cv2.warpPerspective(src_mask, warp_mat, (final_w, final_h), flags=cv2.INTER_NEAREST)
+            w = warped_mask.astype(np.float32) / 255.0
+
+            accum += warped.astype(np.float32) * w[..., None]
+            weights += w
+        except Exception:
+            continue
+
+        # Build current mosaic snapshot
+        denom = np.maximum(weights, 1e-6)
+        snap = (accum / denom[..., None]).astype(np.uint8)
+        snap[weights <= 0] = 0
+
+        # Highlight the newly added image with a coloured border
+        try:
+            border_mask = cv2.warpPerspective(
+                np.ones((th, tw), dtype=np.uint8) * 255,
+                warp_mat, (final_w, final_h), flags=cv2.INTER_NEAREST,
+            )
+            contours, _ = cv2.findContours(border_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(snap, contours, -1, (0, 220, 100), 3)
+        except Exception:
+            pass
+
+        # Add frame counter label
+        label = f"{i}/{len(nodes_sorted)}  {image_name}"
+        cv2.putText(snap, label, (12, snap.shape[0] - 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(snap, label, (12, snap.shape[0] - 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (30, 30, 30), 1, cv2.LINE_AA)
+
+        # Downscale for quick display
+        ph, pw = snap.shape[:2]
+        pscale = min(1.0, float(preview_max_side) / max(ph, pw))
+        if pscale < 1.0:
+            snap = cv2.resize(snap, (int(pw * pscale), int(ph * pscale)), interpolation=cv2.INTER_AREA)
+
+        frame_path = frames_dir / f"frame_{i:04d}_{Path(image_name).stem}.jpg"
+        cv2.imwrite(str(frame_path), snap, [cv2.IMWRITE_JPEG_QUALITY, 82])
+        frame_paths.append(frame_path)
+
+    return frame_paths
+
+
+def _parse_index_key(name: str) -> tuple[int, str]:
+    stem = Path(name).stem
+    return (int(stem), name) if stem.isdigit() else (10**9, name)
+
+
 # ── Stage 4 — Disaster Overlay on Mosaic ─────────────────────────────────
 
 def _compute_global_offset(nodes: list[dict]) -> tuple[float, float]:
@@ -414,6 +530,11 @@ def run_full_pipeline(
         mosaic_tif, output_dir / "masks", poses_path, manifest_path,
         gsd_dict, output_dir, scale_bar_m,
     )
+
+    # ── Stage 5: Progressive stitching frames (for GUI live playback)
+    progress("Generating stitching playback frames…", 0.92)
+    frames_dir = output_dir / "stitch_frames"
+    frame_paths = render_stitching_frames(image_dir, poses_path, manifest_path, frames_dir)
     progress("Pipeline complete!", 1.0)
 
     # Persist summary for the GUI
@@ -430,6 +551,7 @@ def run_full_pipeline(
         "mask_paths": {k: str(v) for k, v in mask_paths.items()},
         "gsd_dict": gsd_dict,
         "has_segmentation": bool(mask_paths),
+        "stitch_frames": [str(p) for p in frame_paths],
     }
     summary_path = output_dir / "pipeline_summary.json"
     with summary_path.open("w", encoding="utf-8") as f:
