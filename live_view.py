@@ -4,7 +4,7 @@ StitchWise — Live Disaster Map Viewer
 Pipeline per image:
   1. Metric scale  — estimate GSD (m/px) from EXIF or depth fallback
   2. YOLO detect   — tiled inference (Raphael) → bounding boxes in image coords
-  3. SAM segment   — refine each box to a pixel mask (Kane)
+  3. CV segment    — classical CV per-class masking within YOLO boxes (Kane)
   4. Stitch        — warp image onto growing mosaic (Zhaochen)
   5. Overlay       — project masks onto mosaic canvas and composite
 
@@ -17,8 +17,9 @@ GUI controls:
 
 Usage:
     python live_view.py --image-dir data/rescuenet_test --ext .jpg
-    python live_view.py --image-dir data/rescuenet_test --n-frames 10 --ext .jpg --reuse
-    python live_view.py --image-dir data/rescuenet_test --no-seg   # skip detection/SAM
+    python live_view.py --image-dir data/rescuenet_test --n-frames 10 --ext .jpg
+    python live_view.py --image-dir data/rescuenet_test --no-seg    # skip detection/segmentation
+    python live_view.py --image-dir data/rescuenet_test --fresh     # force rebuild stitching cache
 """
 
 from __future__ import annotations
@@ -224,20 +225,22 @@ def pipeline_worker(
         q.put(("canvas", final_w, final_h, mosaic_gsd))
 
         # ── 4. Load YOLO (Raphael's final model) ──────────────────────
-        yolo = sam = None
+        yolo = None
         if yolo_weights and Path(yolo_weights).exists():
             q.put(("status", f"Loading YOLO model (device: {DEVICE})…"))
-            from ultralytics import YOLO, SAM
+            from ultralytics import YOLO
             yolo = YOLO(str(yolo_weights))
-            q.put(("status", f"Loading SAM model (device: {DEVICE})…"))
-            try:
-                sam = SAM("mobile_sam.pt")   # small + fast
-            except Exception:
-                try:
-                    sam = SAM("sam_b.pt")
-                except Exception:
-                    sam = None
-                    q.put(("status", "SAM not available — using YOLO boxes only"))
+
+        # Load Kane's classical CV segmenter (no model weights needed)
+        try:
+            from segmentation.segment_cv import (
+                segment_water, segment_building,
+                segment_road,  segment_vehicle,
+            )
+            _CV_SEG_AVAILABLE = True
+        except ImportError:
+            _CV_SEG_AVAILABLE = False
+            q.put(("status", "segment_cv not found — falling back to filled boxes"))
 
         nodes_sorted = sorted(nodes, key=lambda n: _parse_idx(str(n.get("image",""))))
 
@@ -299,39 +302,41 @@ def pipeline_worker(
                         orig_bgr, yolo, conf=conf, iou=0.6)
 
                     if len(boxes) > 0:
-                        # ── 5d. Segment (Kane SAM within YOLO boxes) ──
+                        # ── 5d. Segment (Kane classical CV within YOLO boxes) ──
+                        # Runs on the original full-res image; results scaled to
+                        # processed dims (tw × th) afterward.
                         det_layer = np.zeros((th, tw, 3), dtype=np.uint8)
                         det_alpha = np.zeros((th, tw),    dtype=np.uint8)
 
-                        if sam is not None:
+                        if _CV_SEG_AVAILABLE:
                             try:
-                                # Scale boxes to processed image size
-                                scaled_boxes = boxes.copy()
-                                scaled_boxes[:, [0,2]] *= sx
-                                scaled_boxes[:, [1,3]] *= sy
-                                sam_res = sam.predict(
-                                    source=str(img_path),
-                                    bboxes=scaled_boxes.tolist(),
-                                    device=DEVICE,
-                                    verbose=False)[0]
-                                if sam_res.masks is not None:
-                                    mask_data = sam_res.masks.data.cpu().numpy()
-                                    for mi, mask in enumerate(mask_data):
-                                        cls_id = int(classes[mi]) if mi < len(classes) else 0
-                                        color  = CLASS_BGR.get(cls_id % len(CLASS_BGR),
-                                                               (128, 128, 128))
-                                        # Resize mask to processed image dims
-                                        m = (cv2.resize(
-                                            mask.astype(np.float32), (tw, th),
-                                            interpolation=cv2.INTER_NEAREST) > 0.5)
-                                        det_layer[m] = color
-                                        det_alpha[m] = 255
+                                # Dispatch table: Raphael's 4-class IDs → Kane's segmenters
+                                # 0=Water, 1=Bldg Damaged, 2=Road Blocked, 3=Vehicle
+                                _dispatch = {
+                                    0: lambda img, b: segment_water(img, b),
+                                    1: lambda img, b: segment_building(img, b, morph_size=7),
+                                    2: lambda img, b: segment_road(img, b),
+                                    3: lambda img, b: segment_vehicle(img, b),
+                                }
+                                for box, cls_id in zip(boxes, classes):
+                                    cls_id = int(cls_id)
+                                    fn = _dispatch.get(cls_id)
+                                    if fn is None:
+                                        continue
+                                    x1, y1, x2, y2 = (int(v) for v in box)
+                                    # segment on full-res, returns full-res mask
+                                    mask_full = fn(orig_bgr, (x1, y1, x2, y2))
+                                    # scale mask to processed dims
+                                    mask_proc = cv2.resize(
+                                        mask_full.astype(np.uint8), (tw, th),
+                                        interpolation=cv2.INTER_NEAREST)
+                                    color = CLASS_BGR.get(cls_id, (128, 128, 128))
+                                    det_layer[mask_proc > 0] = color
+                                    det_alpha[mask_proc > 0] = 255
                             except Exception as e:
-                                # SAM failed — fall back to filled boxes
-                                sam = None
-                                q.put(("status", f"SAM error, using boxes: {e}"))
+                                q.put(("status", f"CV seg error, using boxes: {e}"))
 
-                        if sam is None or det_alpha.sum() == 0:
+                        if det_alpha.sum() == 0:
                             # Fallback: draw filled bounding boxes
                             for box, cls_id in zip(boxes, classes):
                                 x1, y1, x2, y2 = box
@@ -378,16 +383,24 @@ def pipeline_worker(
                 except Exception:
                     pass
 
-                q.put(("frame", frame))
+                q.put(("frame", frame, overlay.copy(), ovr_msk.copy()))
 
             except Exception as exc:
                 q.put(("status", f"Skipped {name}: {exc}"))
 
             time.sleep(0.05)
 
-        q.put(("status",
-               f"✓ Done — {placed}/{len(nodes_sorted)} frames  |  "
-               f"Click two points to measure distance"))
+        # ── 6. Save final mosaic ──────────────────────────────────
+        if placed > 0:
+            save_path = output_dir / "final_mosaic.jpg"
+            cv2.imwrite(str(save_path), frame,
+                        [cv2.IMWRITE_JPEG_QUALITY, 95])
+            q.put(("status",
+                   f"✓ Done — {placed}/{len(nodes_sorted)} frames  |  "
+                   f"Saved → {save_path.name}  |  "
+                   f"Click two points to measure distance"))
+        else:
+            q.put(("status", "✓ Done — no frames placed"))
         q.put(("done",))
 
     except Exception:
@@ -397,23 +410,120 @@ def pipeline_worker(
 
 # ── GUI ───────────────────────────────────────────────────────────────────
 
+def _astar(obstacle: np.ndarray,
+           start: tuple[int,int],
+           goal:  tuple[int,int]) -> list[tuple[int,int]] | None:
+    """
+    A* on a 2-D boolean obstacle map (True = blocked).
+    8-connected grid.  Returns pixel-coordinate path or None.
+    If goal is blocked, finds the nearest free cell to it instead.
+    """
+    import heapq
+    H, W = obstacle.shape
+
+    # If goal is inside an obstacle, find nearest free pixel
+    if obstacle[goal[1], goal[0]]:
+        best_d, best_goal = float("inf"), goal
+        # Search in expanding rings (max 200px)
+        for r in range(1, 201):
+            candidates = []
+            for dx in range(-r, r+1):
+                for dy in (-r, r):
+                    candidates.append((goal[0]+dx, goal[1]+dy))
+            for dy in range(-r+1, r):
+                for dx in (-r, r):
+                    candidates.append((goal[0]+dx, goal[1]+dy))
+            found = [(x,y) for x,y in candidates
+                     if 0<=x<W and 0<=y<H and not obstacle[y,x]]
+            if found:
+                best_goal = min(found,
+                    key=lambda p: (p[0]-goal[0])**2+(p[1]-goal[1])**2)
+                break
+        goal = best_goal
+
+    def h(a, b):
+        return max(abs(a[0]-b[0]), abs(a[1]-b[1]))  # Chebyshev
+
+    open_heap = [(h(start, goal), 0, start)]
+    came_from: dict[tuple,tuple] = {}
+    g_score: dict[tuple,float]   = {start: 0}
+
+    while open_heap:
+        _, g, cur = heapq.heappop(open_heap)
+        if cur == goal:
+            path = []
+            while cur in came_from:
+                path.append(cur)
+                cur = came_from[cur]
+            path.append(start)
+            return path[::-1]
+        if g > g_score.get(cur, float("inf")):
+            continue
+        x, y = cur
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                if dx == 0 and dy == 0:
+                    continue
+                nx, ny = x+dx, y+dy
+                if not (0 <= nx < W and 0 <= ny < H):
+                    continue
+                if obstacle[ny, nx]:
+                    continue
+                step = 1.414 if (dx and dy) else 1.0
+                ng = g + step
+                if ng < g_score.get((nx,ny), float("inf")):
+                    g_score[(nx,ny)] = ng
+                    came_from[(nx,ny)] = cur
+                    heapq.heappush(open_heap,
+                        (ng + h((nx,ny), goal), ng, (nx,ny)))
+    return None   # no path found
+
+
+def _build_obstacle_map(overlay_bgr: np.ndarray,
+                        ovr_msk: np.ndarray,
+                        vehicle_cls_id: int = 3) -> np.ndarray:
+    """
+    Build a boolean obstacle map from the accumulated overlay.
+    Pixels that are covered by any class EXCEPT vehicle are obstacles.
+    """
+    H, W = overlay_bgr.shape[:2]
+    obstacle = np.zeros((H, W), dtype=bool)
+
+    vehicle_color = np.array(CLASS_BGR[vehicle_cls_id], dtype=np.uint8)
+
+    covered = ovr_msk > 0.5
+    is_vehicle = np.all(overlay_bgr == vehicle_color, axis=2)
+
+    # Obstacle = covered AND not vehicle
+    obstacle = covered & ~is_vehicle
+    return obstacle
+
+
 class LiveViewApp:
     BG     = "#1a1a2e"
     PANEL  = "#16213e"
     ACC    = "#00c896"
     FG     = "#e0e0e0"
     SUBTLE = "#555566"
+    PATH_COLOR = "#ff9500"   # orange path line
 
-    ZOOM_MIN      = 0.05
-    ZOOM_MAX      = 20.0
+    ZOOM_MIN       = 0.05
+    ZOOM_MAX       = 20.0
     DRAG_THRESHOLD = 4
+
+    # Modes
+    MODE_MEASURE = "measure"
+    MODE_PATH    = "path"
 
     def __init__(self, root: tk.Tk, q: queue.Queue) -> None:
         self.root = root
         self.q    = q
 
-        self.mosaic_bgr: np.ndarray | None = None
-        self.mosaic_gsd: float | None      = None
+        self.mosaic_bgr: np.ndarray | None  = None
+        self.mosaic_gsd: float | None       = None
+        # Accumulated overlay buffers kept for pathfinding
+        self.overlay_bgr: np.ndarray | None = None
+        self.ovr_msk:     np.ndarray | None = None
 
         # Viewport
         self.zoom  = 1.0
@@ -425,8 +535,14 @@ class LiveViewApp:
         self._pan_on_press: tuple[float,float]    = (0.0, 0.0)
         self._drag_moved = False
 
-        # Measurement
+        # Tool mode
+        self.mode = self.MODE_MEASURE
+
+        # Shared click points (used by both modes)
         self.click_pts: list[tuple[int,int]] = []
+
+        # Path result
+        self.path_pts: list[tuple[int,int]] = []
 
         self._tk_img = None
         self._build_ui()
@@ -480,10 +596,28 @@ class LiveViewApp:
 
         tk.Frame(rp, bg="#2e2e50", height=1).pack(fill=tk.X, padx=10, pady=12)
 
-        tk.Label(rp, text="📏  Distance Tool",
+        # ── Mode toggle buttons ───────────────────────────────────────
+        mode_row = tk.Frame(rp, bg=self.PANEL)
+        mode_row.pack(fill=tk.X, padx=10, pady=(0,6))
+        self._btn_measure = tk.Button(
+            mode_row, text="📏 Measure", command=lambda: self._set_mode(self.MODE_MEASURE),
+            bg=self.ACC, fg="#000000", activebackground=self.ACC,
+            relief=tk.FLAT, padx=6, pady=3, cursor="hand2", font=("Helvetica", 8, "bold"))
+        self._btn_measure.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0,2))
+        self._btn_path = tk.Button(
+            mode_row, text="🗺 Path", command=lambda: self._set_mode(self.MODE_PATH),
+            bg="#252545", fg=self.FG, activebackground="#333355",
+            relief=tk.FLAT, padx=6, pady=3, cursor="hand2", font=("Helvetica", 8))
+        self._btn_path.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2,0))
+
+        # ── Tool label (changes with mode) ────────────────────────────
+        self.tool_title_var = tk.StringVar(value="📏  Distance Tool")
+        tk.Label(rp, textvariable=self.tool_title_var,
                  font=("Helvetica", 10, "bold"),
                  bg=self.PANEL, fg=self.ACC).pack()
-        tk.Label(rp, text="Left-click two points on the map",
+
+        self.tool_hint_var = tk.StringVar(value="Left-click two points on the map")
+        tk.Label(rp, textvariable=self.tool_hint_var,
                  bg=self.PANEL, fg="#666677",
                  font=("Helvetica", 8), wraplength=170).pack(pady=(3,0))
 
@@ -500,8 +634,8 @@ class LiveViewApp:
 
         btn_row = tk.Frame(rp, bg=self.PANEL)
         btn_row.pack(pady=8)
-        for label, cmd in [("Clear pts", self._clear_pts),
-                           ("Fit",        self._fit_to_window)]:
+        for label, cmd in [("Clear", self._clear_pts),
+                           ("Fit",   self._fit_to_window)]:
             tk.Button(btn_row, text=label, command=cmd,
                       bg="#252545", fg=self.FG, activebackground="#333355",
                       relief=tk.FLAT, padx=7, pady=4, cursor="hand2",
@@ -562,7 +696,9 @@ class LiveViewApp:
             self.mosaic_gsd = gsd
             self.gsd_var.set(f"GSD ≈ {gsd*100:.2f} cm/px")
         elif kind == "frame":
-            self.mosaic_bgr = msg[1]
+            self.mosaic_bgr  = msg[1]
+            self.overlay_bgr = msg[2]
+            self.ovr_msk     = msg[3]
             if self.zoom == 1.0 and self.pan_x == 0.0:
                 self._fit_to_window()
             else:
@@ -614,9 +750,29 @@ class LiveViewApp:
         screen_x = int(self.pan_x + x0 * self.zoom)
         screen_y = int(self.pan_y + y0 * self.zoom)
 
+        draw = ImageDraw.Draw(pil)
+
+        # Draw path (if any)
+        if self.path_pts:
+            # Downsample path for drawing (every Nth point for speed)
+            step = max(1, len(self.path_pts) // 500)
+            pts_screen = [
+                (int((px-x0)*self.zoom), int((py-y0)*self.zoom))
+                for px, py in self.path_pts[::step]
+            ]
+            pts_screen.append((int((self.path_pts[-1][0]-x0)*self.zoom),
+                                int((self.path_pts[-1][1]-y0)*self.zoom)))
+            # Draw thick orange line
+            for i in range(len(pts_screen)-1):
+                ax, ay = pts_screen[i]
+                bx, by = pts_screen[i+1]
+                if (-20 <= ax <= disp_w+20 or -20 <= bx <= disp_w+20):
+                    draw.line([(ax,ay),(bx,by)], fill=self.PATH_COLOR, width=3)
+
+        # Draw click markers
         if self.click_pts:
-            draw   = ImageDraw.Draw(pil)
             colors = ["#00ff80", "#ff4444"]
+            labels = ["S", "E"] if self.mode == self.MODE_PATH else ["A", "B"]
             dpts   = []
             for mx, my in self.click_pts:
                 dpts.append((int((mx-x0)*self.zoom), int((my-y0)*self.zoom)))
@@ -625,8 +781,9 @@ class LiveViewApp:
                     rr = 7
                     draw.ellipse([sx-rr, sy-rr, sx+rr, sy+rr],
                                  fill=colors[i], outline="white", width=2)
-                    draw.text((sx+11, sy-9), "AB"[i], fill="white")
-            if len(dpts) == 2:
+                    draw.text((sx+11, sy-9), labels[i], fill="white")
+            # Straight line for measure mode only
+            if self.mode == self.MODE_MEASURE and len(dpts) == 2:
                 draw.line([dpts[0], dpts[1]], fill="#ffff00", width=2)
 
         self._tk_img = ImageTk.PhotoImage(pil)
@@ -674,7 +831,26 @@ class LiveViewApp:
         self.zoom  = new
         self._refresh_display()
 
-    # ── Distance measurement ──────────────────────────────────────────────
+    # ── Mode switching ────────────────────────────────────────────────────
+    def _set_mode(self, mode: str) -> None:
+        self.mode = mode
+        self._clear_pts()
+        if mode == self.MODE_MEASURE:
+            self._btn_measure.configure(bg=self.ACC, fg="#000000",
+                                        font=("Helvetica", 8, "bold"))
+            self._btn_path.configure(bg="#252545", fg=self.FG,
+                                     font=("Helvetica", 8))
+            self.tool_title_var.set("📏  Distance Tool")
+            self.tool_hint_var.set("Left-click two points on the map")
+        else:
+            self._btn_path.configure(bg=self.PATH_COLOR, fg="#000000",
+                                     font=("Helvetica", 8, "bold"))
+            self._btn_measure.configure(bg="#252545", fg=self.FG,
+                                        font=("Helvetica", 8))
+            self.tool_title_var.set("🗺  Path Tool")
+            self.tool_hint_var.set("Click Start then End — avoids disaster zones")
+
+    # ── Click handler (shared by both modes) ──────────────────────────────
     def _register_click(self, sx: int, sy: int) -> None:
         if self.mosaic_bgr is None:
             return
@@ -686,30 +862,100 @@ class LiveViewApp:
 
         if len(self.click_pts) >= 2:
             self.click_pts.clear()
+            self.path_pts.clear()
         self.click_pts.append((mx, my))
 
         if len(self.click_pts) == 2:
-            dx = self.click_pts[1][0] - self.click_pts[0][0]
-            dy = self.click_pts[1][1] - self.click_pts[0][1]
-            dist_px = float(np.sqrt(dx**2 + dy**2))
+            if self.mode == self.MODE_MEASURE:
+                self._compute_distance()
+            else:
+                self._compute_path()
+        else:
+            self.dist_var.set("…")
+            label = "Start" if self.mode == self.MODE_PATH else "A"
+            self.pt_var.set(f"{label} ({mx}, {my})\nNow click {'End' if self.mode == self.MODE_PATH else 'B'}")
+
+        self._refresh_display()
+
+    def _compute_distance(self) -> None:
+        dx = self.click_pts[1][0] - self.click_pts[0][0]
+        dy = self.click_pts[1][1] - self.click_pts[0][1]
+        dist_px = float(np.sqrt(dx**2 + dy**2))
+        if self.mosaic_gsd:
+            dist_m = dist_px * self.mosaic_gsd
+            self.dist_var.set(f"{dist_m:.1f} m")
+            self.pt_var.set(
+                f"A ({self.click_pts[0][0]}, {self.click_pts[0][1]})\n"
+                f"B ({self.click_pts[1][0]}, {self.click_pts[1][1]})\n"
+                f"{dist_px:.0f} px  ×  {self.mosaic_gsd*100:.2f} cm/px"
+            )
+        else:
+            self.dist_var.set(f"{dist_px:.0f} px")
+
+    def _compute_path(self) -> None:
+        if self.overlay_bgr is None or self.ovr_msk is None:
+            self.dist_var.set("No overlay yet")
+            self.pt_var.set("Run pipeline first")
+            return
+
+        self.dist_var.set("Finding path…")
+        self.pt_var.set("")
+        self._refresh_display()
+        self.root.update_idletasks()
+
+        start = self.click_pts[0]
+        goal  = self.click_pts[1]
+
+        # Build obstacle map at full mosaic resolution
+        # Dilate obstacles slightly (3px) so path stays away from edges
+        obstacle = _build_obstacle_map(self.overlay_bgr, self.ovr_msk)
+        kernel   = np.ones((7, 7), np.uint8)
+        obstacle = cv2.dilate(obstacle.astype(np.uint8), kernel).astype(bool)
+
+        # A* — run in current thread (fast enough for typical mosaic sizes)
+        # Downsample for speed: run A* on 4× downsampled map, then upsample path
+        SCALE = 4
+        H, W = obstacle.shape
+        # Downsample with max-pooling: any obstacle in the block → blocked
+        sh, sw = (H // SCALE) * SCALE, (W // SCALE) * SCALE
+        small_obs = (obstacle[:sh, :sw]
+                     .reshape(H // SCALE, SCALE, W // SCALE, SCALE)
+                     .max(axis=(1, 3))
+                     .astype(bool))
+
+        s_small = (start[0] // SCALE, start[1] // SCALE)
+        g_small = (goal[0]  // SCALE, goal[1]  // SCALE)
+
+        path_small = _astar(small_obs, s_small, g_small)
+
+        if path_small is None:
+            self.dist_var.set("No path")
+            self.pt_var.set("Destination completely surrounded by obstacles")
+            self.path_pts = []
+        else:
+            # Upsample path back to full resolution
+            self.path_pts = [(px * SCALE, py * SCALE) for px, py in path_small]
+            # Compute path length
+            dist_px = sum(
+                np.sqrt((self.path_pts[i+1][0]-self.path_pts[i][0])**2 +
+                        (self.path_pts[i+1][1]-self.path_pts[i][1])**2)
+                for i in range(len(self.path_pts)-1)
+            ) * SCALE  # correct for downscale
             if self.mosaic_gsd:
                 dist_m = dist_px * self.mosaic_gsd
                 self.dist_var.set(f"{dist_m:.1f} m")
                 self.pt_var.set(
-                    f"A ({self.click_pts[0][0]}, {self.click_pts[0][1]})\n"
-                    f"B ({self.click_pts[1][0]}, {self.click_pts[1][1]})\n"
-                    f"{dist_px:.0f} px  ×  {self.mosaic_gsd*100:.2f} cm/px"
+                    f"S ({start[0]}, {start[1]})\n"
+                    f"E ({goal[0]}, {goal[1]})\n"
+                    f"Path: {dist_px:.0f} px  ≈  {dist_m:.1f} m\n"
+                    f"({len(self.path_pts)} waypoints)"
                 )
             else:
                 self.dist_var.set(f"{dist_px:.0f} px")
-        else:
-            self.dist_var.set("…")
-            self.pt_var.set(f"A ({mx}, {my})\nNow click B")
-
-        self._refresh_display()
 
     def _clear_pts(self) -> None:
         self.click_pts.clear()
+        self.path_pts  = []
         self.dist_var.set("—")
         self.pt_var.set("")
         self._refresh_display()
@@ -740,8 +986,11 @@ def _parse_args() -> argparse.Namespace:
                    help="Stitching neighbour offsets")
     p.add_argument("--no-seg",  action="store_true",
                    help="Skip detection + segmentation (plain stitching)")
+    p.add_argument("--fresh",   action="store_true",
+                   help="Force rebuild pair graph even if cache exists")
+    # Legacy alias kept for backward compat (does nothing — cache is now auto-reused)
     p.add_argument("--reuse",   action="store_true",
-                   help="Reuse cached stitching results if present")
+                   help=argparse.SUPPRESS)
     return p.parse_args()
 
 
@@ -762,7 +1011,7 @@ def main() -> None:
     if args.n_frames:
         images = images[:args.n_frames]
 
-    if not args.reuse:
+    if args.fresh:
         import shutil
         for d in ["pair_graph", "global_no_ba"]:
             t = output_dir / d
