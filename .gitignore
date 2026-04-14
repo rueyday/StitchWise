@@ -4,4 +4,4 @@
 /uploads
 __pycache__/
 *.pyc
-*.pt
+# *.pt   # weights tracked explicitly
