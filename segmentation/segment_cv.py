@@ -24,10 +24,10 @@ Usage (identical CLI to segment_sam.py)
 
 Benchmark mode (speed + IoU vs SAM or GT masks)
 ------------------------------------------------
-    python segment_cv.py --benchmark \\
-        --source data/rescuenet_yolo/test/images/ \\
-        [--compare-sam] [--sam-model sam_b.pt] \\
-        [--sam-masks outputs/runs/sam_segmentation/masks/] \\
+    python segment_cv.py --benchmark \
+        --source data/rescuenet_yolo/test/images/ \
+        [--compare-sam] [--sam-model sam_b.pt] \
+        [--sam-masks outputs/runs/sam_segmentation/masks/] \
         [--max-images 50]
 """
 
@@ -71,8 +71,9 @@ CLASS_COLORS = {
 # HYPER-PARAMETERS
 # ---------------------------------------------------------------------------
 BOX_PAD_FRAC  = 0.15   # padding added around YOLO box before GrabCut (% of box side)
-GRABCUT_ITER  = 5      # GrabCut EM iterations (5 is standard; more = slower, marginal gain)
+GRABCUT_ITER  = 3      # OPTIMIZED from 5: 3 iterations is much faster; morph ops handle the rest
 MIN_BOX_PX    = 12     # boxes smaller than this skip GrabCut and use filled rect fallback
+MAX_GC_DIM    = 150    # OPTIMIZATION: dynamically downscale crops larger than this for GrabCut
 
 
 # ===========================================================================
@@ -107,6 +108,7 @@ def _padded_crop(image: np.ndarray, x1: int, y1: int, x2: int, y2: int,
 def _grabcut(crop: np.ndarray, rect: tuple, n_iter: int = GRABCUT_ITER) -> np.ndarray:
     """
     Run GrabCut on *crop* initialised with *rect* = (x, y, w, h) in crop coords.
+    Includes dynamic downscaling for large crops to heavily optimize runtime.
 
     Returns a binary mask (uint8, same H×W as crop): 1 = foreground, 0 = background.
     Falls back to a filled-rect mask if GrabCut raises (too-small image, degenerate box).
@@ -120,16 +122,52 @@ def _grabcut(crop: np.ndarray, rect: tuple, n_iter: int = GRABCUT_ITER) -> np.nd
         fallback[ry:ry+rh, rx:rx+rw] = 1
         return fallback
 
+    # --- OPTIMIZATION: Downscale large crops for speed ---
+    scale = 1.0
+    max_dim = max(cw, ch)
+    if max_dim > MAX_GC_DIM:
+        scale = MAX_GC_DIM / max_dim
+
+    if scale < 1.0:
+        new_w, new_h = max(5, int(cw * scale)), max(5, int(ch * scale))
+        crop_gc = cv2.resize(crop, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        
+        # Scale the rect and clamp strictly to new bounds
+        rx_s, ry_s = int(rx * scale), int(ry * scale)
+        rw_s, rh_s = int(rw * scale), int(rh * scale)
+        
+        rx_s = max(0, min(rx_s, new_w - 3))
+        ry_s = max(0, min(ry_s, new_h - 3))
+        rw_s = max(3, min(rw_s, new_w - rx_s))
+        rh_s = max(3, min(rh_s, new_h - ry_s))
+        
+        rect_gc = (rx_s, ry_s, rw_s, rh_s)
+    else:
+        crop_gc = crop
+        rect_gc = rect
+
+    gc_h, gc_w = crop_gc.shape[:2]
+
     try:
-        gc_mask = np.zeros((ch, cw), np.uint8)
+        gc_mask = np.zeros((gc_h, gc_w), np.uint8)
         bgd = np.zeros((1, 65), np.float64)
         fgd = np.zeros((1, 65), np.float64)
-        cv2.grabCut(crop, gc_mask, rect, bgd, fgd, n_iter, cv2.GC_INIT_WITH_RECT)
-        return np.where(
+        
+        # Run GrabCut on the scaled (or original) crop
+        cv2.grabCut(crop_gc, gc_mask, rect_gc, bgd, fgd, n_iter, cv2.GC_INIT_WITH_RECT)
+        
+        binary_mask = np.where(
             (gc_mask == cv2.GC_FGD) | (gc_mask == cv2.GC_PR_FGD), 1, 0
         ).astype(np.uint8)
+
+        # --- OPTIMIZATION: Upscale back to original size ---
+        if scale < 1.0:
+            binary_mask = cv2.resize(binary_mask, (cw, ch), interpolation=cv2.INTER_NEAREST)
+
+        return binary_mask
+
     except cv2.error:
-        # Degenerate case — return filled bounding rect
+        # Degenerate case — return filled bounding rect at original scale
         fallback = np.zeros((ch, cw), np.uint8)
         fallback[ry:ry+rh, rx:rx+rw] = 1
         return fallback
@@ -150,35 +188,47 @@ def _paste_mask(full_h: int, full_w: int,
 
 def segment_water(image: np.ndarray, box: tuple) -> np.ndarray:
     """
-    Otsu threshold on the LAB L-channel (flood water is dark) inside the box,
-    with a GrabCut fallback when Otsu produces a degenerate result.
+    Multi-cue water detector inside the YOLO bounding box.
 
-    Why LAB?  L (lightness) is perceptually uniform and decouples brightness
-    from colour, so dark water stands apart from bright land regardless of RGB
-    hue shifts caused by atmospheric haze or sensor response.
+    Cue 1 — LAB L-channel Otsu (inverted): captures dark flood/turbid water.
+    Cue 2 — HSV hue mask: captures blue-green clear/reflective water.
+             OpenCV hue range 85–140 (out of 180) ≈ cyan/blue/teal.
+             Saturation > 25 avoids painting grey rubble or white rooftops.
+
+    Both cues are restricted to the box region and OR-combined.  GrabCut is
+    used as a fallback only when the combined result is degenerate (<5% or
+    >90% coverage), preventing the full-box flood that Otsu alone caused on
+    reflective or turbid water.
     """
     x1, y1, x2, y2 = box
     H, W = image.shape[:2]
     crop, crop_coords, rect = _padded_crop(image, x1, y1, x2, y2)
+    rx, ry, rw, rh = rect
 
-    # --- Otsu on L channel (inverted: water is dark → bright in INV mask) ---
+    # --- Cue 1: Otsu on LAB L-channel (dark water) ---
     lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)
     l_chan = lab[:, :, 0]
     _, otsu = cv2.threshold(l_chan, 0, 1,
                             cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-    # Restrict to the actual box region within the padded crop
-    rx, ry, rw, rh = rect
-    box_mask = np.zeros_like(otsu)
-    box_mask[ry:ry+rh, rx:rx+rw] = otsu[ry:ry+rh, rx:rx+rw]
+    # --- Cue 2: HSV hue (blue-green water) ---
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    h_chan = hsv[:, :, 0]
+    s_chan = hsv[:, :, 1]
+    hue_mask = ((h_chan >= 85) & (h_chan <= 140) & (s_chan > 25)).astype(np.uint8)
 
-    coverage = box_mask.sum() / max(rw * rh, 1)
+    # Combine cues, restricted to the original box region inside the crop
+    combined = np.zeros(otsu.shape, np.uint8)
+    combined[ry:ry+rh, rx:rx+rw] = (
+        otsu[ry:ry+rh, rx:rx+rw] | hue_mask[ry:ry+rh, rx:rx+rw]
+    )
+
+    coverage = combined.sum() / max(rw * rh, 1)
 
     if 0.05 < coverage < 0.90:
-        # Plausible Otsu result — close small holes
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-        box_mask = cv2.morphologyEx(box_mask, cv2.MORPH_CLOSE, kernel)
-        return _paste_mask(H, W, box_mask, crop_coords)
+        combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel)
+        return _paste_mask(H, W, combined, crop_coords)
 
     # --- Fallback: GrabCut ---
     gc_mask = _grabcut(crop, rect)
@@ -265,13 +315,13 @@ def segment_vehicle(image: np.ndarray, box: tuple) -> np.ndarray:
 # PUBLIC API
 # ===========================================================================
 
-def segment(image: np.ndarray, boxes: list, class_ids: list) -> np.ndarray:
+def segment(image: np.ndarray, boxes: list, class_ids: list) -> tuple:
     """
     Segment all detected objects and return a semantic map.
 
     Parameters
     ----------
-    image     : H×W×3 BGR image (as returned by cv2.imread)
+    image     : HxWx3 BGR image (as returned by cv2.imread)
     boxes     : list of [x1,y1,x2,y2] pixel coords (YOLO xyxy format)
     class_ids : list of int class IDs (0-4)
 
@@ -282,9 +332,14 @@ def segment(image: np.ndarray, boxes: list, class_ids: list) -> np.ndarray:
         NOTE: class 0 (water) and unmasked background are both value 0 — same
         convention as segment_sam.py; downstream code should intersect with
         YOLO boxes to distinguish them if needed.
+    detected : np.ndarray bool, shape (H, W)
+        True for every pixel that was assigned a class by the segmenter.
+        Used by visualize() to distinguish water pixels (class 0) from the
+        background (also value 0 in semantic_map).
     """
     H, W = image.shape[:2]
     semantic_map = np.zeros((H, W), dtype=np.uint8)
+    detected = np.zeros((H, W), dtype=bool)
 
     for box, cls_id in zip(boxes, class_ids):
         cls_id = int(cls_id)
@@ -307,38 +362,36 @@ def segment(image: np.ndarray, boxes: list, class_ids: list) -> np.ndarray:
             continue
 
         semantic_map[mask > 0] = cls_id
+        detected[mask > 0] = True
 
-    return semantic_map
+    return semantic_map, detected
 
 
-def visualize(image: np.ndarray, semantic_map: np.ndarray,
-              boxes: list, class_ids: list) -> np.ndarray:
+def visualize(image: np.ndarray, semantic_map: np.ndarray, detected: np.ndarray,
+              boxes: list, class_ids: list, confs: list) -> np.ndarray:
     """Return a BGR image with translucent mask overlays and box annotations."""
     vis = image.copy()
     overlay = image.copy()
 
     for cls_id, color in CLASS_COLORS.items():
-        region = semantic_map == cls_id
-        # class 0 mask regions are inside a detected box — don't paint entire background
+        # For water (class 0), semantic_map == 0 also matches undetected background
+        # pixels, so we intersect with the detected mask to paint only real water.
         if cls_id == 0:
-            box_canvas = np.zeros(semantic_map.shape, np.uint8)
-            for box, cid in zip(boxes, class_ids):
-                if int(cid) == 0:
-                    x1, y1, x2, y2 = (int(v) for v in box)
-                    box_canvas[y1:y2, x1:x2] = 1
-            region = region & (box_canvas > 0)
+            region = (semantic_map == 0) & detected
+        else:
+            region = semantic_map == cls_id
         if not region.any():
             continue
         overlay[region] = color
 
     cv2.addWeighted(overlay, 0.45, vis, 0.55, 0, vis)
 
-    for box, cls_id in zip(boxes, class_ids):
+    for box, cls_id, conf in zip(boxes, class_ids, confs):
         cls_id = int(cls_id)
         x1, y1, x2, y2 = (int(v) for v in box)
         color = CLASS_COLORS.get(cls_id, (255, 255, 255))
         cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
-        label = CLASS_NAMES.get(cls_id, str(cls_id))
+        label = f"{CLASS_NAMES.get(cls_id, str(cls_id))} {conf:.2f}"
         cv2.putText(vis, label, (x1, max(y1 - 6, 14)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
 
@@ -371,13 +424,14 @@ def process_image(img_path: Path, yolo_model, out_dir: Path,
 
     boxes = yolo_results.boxes.xyxy.tolist()
     class_ids = yolo_results.boxes.cls.tolist()
+    confs = yolo_results.boxes.conf.tolist()
     print(f"  └─ {len(boxes)} detections — running CV segmentation...")
 
     t0 = time.perf_counter()
-    semantic_map = segment(image, boxes, class_ids)
+    semantic_map, detected = segment(image, boxes, class_ids)
     elapsed = time.perf_counter() - t0
 
-    vis = visualize(image, semantic_map, boxes, class_ids)
+    vis = visualize(image, semantic_map, detected, boxes, class_ids, confs)
     cv2.imwrite(str(out_dir / "visualizations" / f"viz_{img_path.name}"), vis)
     cv2.imwrite(str(out_dir / "masks" / f"mask_{img_path.stem}.png"), semantic_map)
 
@@ -444,7 +498,7 @@ def run_benchmark(args):
 
         # --- CV timing ---
         t0 = time.perf_counter()
-        cv_map = segment(image, boxes, class_ids)
+        cv_map, _ = segment(image, boxes, class_ids)
         cv_times.append(time.perf_counter() - t0)
 
         # --- SAM (live) timing + map ---
