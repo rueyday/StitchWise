@@ -1,18 +1,6 @@
 """
 RapidGeoStitch — Live Disaster Map Viewer
 ==========================================
-Pipeline per image:
-  1. Metric scale  — GSD estimation from EXIF (m/px)
-  2. YOLO detect   — tiled inference → bounding boxes (Raphael)
-  3. CV segment    — classical CV per-class masking (Kane)
-  4. Stitch        — SIFT/RANSAC global mosaic (Zhaochen)
-  5. Overlay       — disaster masks composited onto mosaic canvas
-
-GUI controls:
-  Drag           — pan
-  Scroll wheel   — zoom (anchored at cursor)
-  Double-click   — fit to window
-  Left-click ×2  — measure (Measure mode) or route (Path mode)
 
 Usage:
     python live_view.py --image-dir data/rescuenet_big --ext .jpg
@@ -41,15 +29,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-# ── Class definitions (matches Raphael's final rescuenet_v2 model) ─────────
-# 4 classes: water, building-damaged, road-blocked, vehicle
 CLASS_NAMES: dict[int, str] = {
     0: "Water / Flooding",
     1: "Bldg Damaged",
     2: "Road Blocked",
     3: "Vehicle",
 }
-# BGR for OpenCV, RGB for PIL/tkinter
+
 CLASS_BGR: dict[int, tuple] = {
     0: ( 20,  90, 210),   # blue
     1: ( 20,  20, 210),   # red
@@ -64,13 +50,9 @@ RENDER_MAX_AREA = 16_000_000
 DISPLAY_W       = 960
 DISPLAY_H       = 700
 
-# Auto-select GPU if available, fall back to CPU
 import torch as _torch
 DEVICE = "cuda" if _torch.cuda.is_available() else \
          "mps"  if _torch.backends.mps.is_available() else "cpu"
-
-
-# ── Helpers ────────────────────────────────────────────────────────────────
 
 def _parse_idx(name: str) -> int:
     stem = Path(name).stem
@@ -81,10 +63,6 @@ def _tiled_detect(img_bgr: np.ndarray, model,
                   conf: float, iou: float,
                   tile_size: int = 640, overlap: int = 64,
                   device: str = DEVICE) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Raphael's tiled-inference logic, inlined for use on per-image BGR arrays.
-    Returns (boxes[N,4], scores[N], classes[N]) in image-pixel coords.
-    """
     h, w   = img_bgr.shape[:2]
     stride = tile_size - overlap
     tiles  = []
@@ -120,9 +98,6 @@ def _tiled_detect(img_bgr: np.ndarray, model,
     return (b_t[keep].numpy(), s_t[keep].numpy(),
             c_t[keep].numpy().astype(np.int32))
 
-
-# ── Background pipeline worker ─────────────────────────────────────────────
-
 def pipeline_worker(
     image_dir: Path,
     images:    list[Path],
@@ -138,7 +113,7 @@ def pipeline_worker(
         from stitchwise.io_utils import load_image, resolve_image_path, resize_by_max_dim
         from metric_scale        import estimate as estimate_gsd
 
-        # ── 1. Metric scale ───────────────────────────────────────────
+        # 1. Metric scale
         q.put(("status", "Estimating metric scale…"))
         gsds: dict[str, float] = {}
         for p in images:
@@ -149,7 +124,7 @@ def pipeline_worker(
         mean_gsd = float(np.mean(list(gsds.values())))
         q.put(("status", f"Mean GSD: {mean_gsd*100:.2f} cm/px"))
 
-        # ── 2. Stitching: pair graph + global solve ────────────────────
+        # 2. Stitching: pair graph + global solve
         pair_dir   = output_dir / "pair_graph"
         global_dir = output_dir / "global_no_ba"
         poses_path = global_dir / "global_poses.json"
@@ -186,7 +161,7 @@ def pipeline_worker(
             q.put(("error", "No nodes in global poses"))
             return
 
-        # ── 3. Canvas geometry ─────────────────────────────────────────
+        # 3. Canvas geometry
         cfg = load_config(PROJECT_ROOT / "configs" / "stitching.yaml")
         cfg.data_dir = str(image_dir)
 
@@ -222,14 +197,14 @@ def pipeline_worker(
         mosaic_gsd = mean_gsd / rs
         q.put(("canvas", final_w, final_h, mosaic_gsd))
 
-        # ── 4. Load YOLO (Raphael's final model) ──────────────────────
+        # 4. Load YOLO
         yolo = None
         if yolo_weights and Path(yolo_weights).exists():
             q.put(("status", f"Loading YOLO model (device: {DEVICE})…"))
             from ultralytics import YOLO
             yolo = YOLO(str(yolo_weights))
 
-        # Load Kane's classical CV segmenter (no model weights needed)
+        # Load classical CV segmenter
         try:
             from segmentation.segment_cv import (
                 segment_water, segment_building,
@@ -248,7 +223,7 @@ def pipeline_worker(
         overlay = np.zeros((final_h, final_w, 3), dtype=np.uint8)   # BGR colour
         ovr_msk = np.zeros((final_h, final_w),    dtype=np.float32) # alpha
 
-        # ── 5. Incremental render loop ────────────────────────────────
+        # 5. Incremental render loop
         placed = 0
         for i, node in enumerate(nodes_sorted, 1):
             name = str(node.get("image",""))
@@ -262,8 +237,7 @@ def pipeline_worker(
 
             try:
                 img_path = resolve_image_path(name, cfg.data_dir)
-
-                # ── 5a. Load + resize to stitching dims ───────────────
+                
                 img      = load_image(img_path)
                 img_proc, _ = resize_by_max_dim(img, cfg.resize_max_dim)
                 th, tw = int(sh[0]), int(sh[1])
@@ -273,8 +247,6 @@ def pipeline_worker(
 
                 H        = np.array(Hr, dtype=np.float64)
                 warp_mat = T @ H
-
-                # ── 5b. Warp image onto accumulation canvas ────────────
                 warped  = cv2.warpPerspective(
                     img_proc, warp_mat, (final_w, final_h), flags=cv2.INTER_LINEAR)
                 src_mask = np.ones((th, tw), dtype=np.uint8) * 255
@@ -289,8 +261,7 @@ def pipeline_worker(
                 denom  = np.maximum(weights, 1e-6)
                 mosaic = (accum / denom[..., None]).astype(np.uint8)
                 mosaic[weights <= 0] = 0
-
-                # ── 5c. Detect (Raphael tiled YOLO) ───────────────────
+                
                 if yolo is not None:
                     orig_bgr = cv2.imread(str(img_path))
                     oh, ow   = orig_bgr.shape[:2]
@@ -300,9 +271,6 @@ def pipeline_worker(
                         orig_bgr, yolo, conf=conf, iou=0.6)
 
                     if len(boxes) > 0:
-                        # ── 5d. Segment (Kane classical CV within YOLO boxes) ──
-                        # Runs on the original full-res image; results scaled to
-                        # processed dims (tw × th) afterward.
                         det_layer = np.zeros((th, tw, 3), dtype=np.uint8)
                         det_alpha = np.zeros((th, tw),    dtype=np.uint8)
 
@@ -353,8 +321,7 @@ def pipeline_worker(
                         for c in range(3):
                             overlay[:,:,c] = np.where(dm > 0.5, wd[:,:,c], overlay[:,:,c])
                         ovr_msk = np.maximum(ovr_msk, dm)
-
-                # ── 5e. Composite mosaic + disaster overlay ────────────
+                
                 frame = mosaic.astype(np.float32)
                 for c in range(3):
                     frame[:,:,c] = np.where(
@@ -379,8 +346,7 @@ def pipeline_worker(
                 q.put(("status", f"Skipped {name}: {exc}"))
 
             time.sleep(0.05)
-
-        # ── 6. Save final mosaic ──────────────────────────────────
+        
         if placed > 0:
             save_path = output_dir / "final_mosaic.jpg"
             cv2.imwrite(str(save_path), frame,
@@ -397,9 +363,7 @@ def pipeline_worker(
         import traceback
         q.put(("error", traceback.format_exc()))
 
-
-# ── GUI ───────────────────────────────────────────────────────────────────
-
+# GUI
 def _astar(obstacle: np.ndarray,
            start: tuple[int,int],
            goal:  tuple[int,int]) -> list[tuple[int,int]] | None:
@@ -483,8 +447,6 @@ def _build_obstacle_map(overlay_bgr: np.ndarray,
 
     covered = ovr_msk > 0.5
     is_vehicle = np.all(overlay_bgr == vehicle_color, axis=2)
-
-    # Obstacle = covered AND not vehicle
     obstacle = covered & ~is_vehicle
     return obstacle
 
@@ -514,8 +476,7 @@ class LiveViewApp:
         # Accumulated overlay buffers kept for pathfinding
         self.overlay_bgr: np.ndarray | None = None
         self.ovr_msk:     np.ndarray | None = None
-
-        # Viewport
+        
         self.zoom  = 1.0
         self.pan_x = 0.0
         self.pan_y = 0.0
@@ -525,20 +486,14 @@ class LiveViewApp:
         self._pan_on_press: tuple[float,float]    = (0.0, 0.0)
         self._drag_moved = False
 
-        # Tool mode
         self.mode = self.MODE_MEASURE
-
-        # Shared click points (used by both modes)
         self.click_pts: list[tuple[int,int]] = []
-
-        # Path result
         self.path_pts: list[tuple[int,int]] = []
 
         self._tk_img = None
         self._build_ui()
         root.after(80, self._poll)
-
-    # ── Layout ────────────────────────────────────────────────────────────
+    
     def _build_ui(self) -> None:
         r = self.root
         r.configure(bg=self.BG)
@@ -564,8 +519,7 @@ class LiveViewApp:
         self.canvas.bind("<Button-5>",       lambda e: self._zoom_at(e, 1/1.15))
         self.canvas.bind("<Double-Button-1>",lambda _: self._fit_to_window())
         self.canvas.bind("<Configure>",      self._on_canvas_resize)
-
-        # ── Right panel ───────────────────────────────────────────────
+        
         rp = tk.Frame(body, bg=self.PANEL, width=200)
         rp.pack(side=tk.RIGHT, fill=tk.Y, padx=(5,0))
         rp.pack_propagate(False)
@@ -585,8 +539,7 @@ class LiveViewApp:
                      justify=tk.LEFT).pack(side=tk.LEFT, padx=4)
 
         tk.Frame(rp, bg="#2e2e50", height=1).pack(fill=tk.X, padx=10, pady=12)
-
-        # ── Mode toggle buttons ───────────────────────────────────────
+        
         mode_row = tk.Frame(rp, bg=self.PANEL)
         mode_row.pack(fill=tk.X, padx=10, pady=(0,6))
         self._btn_measure = tk.Button(
@@ -599,8 +552,6 @@ class LiveViewApp:
             bg="#252545", fg=self.FG, activebackground="#333355",
             relief=tk.FLAT, padx=6, pady=3, cursor="hand2", font=("Helvetica", 8))
         self._btn_path.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2,0))
-
-        # ── Tool label (changes with mode) ────────────────────────────
         self.tool_title_var = tk.StringVar(value="📏  Distance Tool")
         tk.Label(rp, textvariable=self.tool_title_var,
                  font=("Helvetica", 10, "bold"),
@@ -644,8 +595,7 @@ class LiveViewApp:
         tk.Label(rp, textvariable=self.gsd_var,
                  bg=self.PANEL, fg=self.SUBTLE,
                  font=("Helvetica", 7)).pack(side=tk.BOTTOM, pady=6)
-
-        # ── Bottom bar ────────────────────────────────────────────────
+        
         bot = tk.Frame(r, bg=self.PANEL, pady=5)
         bot.pack(fill=tk.X)
 
@@ -665,7 +615,7 @@ class LiveViewApp:
                  font=("Helvetica", 9), anchor="w",
                  ).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-    # ── Queue polling ──────────────────────────────────────────────────────
+    # Queue polling
     def _poll(self) -> None:
         try:
             while True:
@@ -698,7 +648,7 @@ class LiveViewApp:
         elif kind == "error":
             self.status_var.set("ERROR — " + str(msg[1])[:120])
 
-    # ── Viewport rendering ────────────────────────────────────────────────
+    # Viewport rendering
     def _fit_to_window(self) -> None:
         if self.mosaic_bgr is None:
             return
@@ -742,7 +692,7 @@ class LiveViewApp:
 
         draw = ImageDraw.Draw(pil)
 
-        # Draw path (if any)
+        # Draw path
         if self.path_pts:
             # Downsample path for drawing (every Nth point for speed)
             step = max(1, len(self.path_pts) // 500)
@@ -781,7 +731,7 @@ class LiveViewApp:
         self.canvas.create_image(screen_x, screen_y, anchor="nw", image=self._tk_img)
         self.zoom_var.set(f"{self.zoom*100:.0f}%")
 
-    # ── Interaction handlers ──────────────────────────────────────────────
+    # Interaction handlers
     def _on_canvas_resize(self, event: tk.Event) -> None:
         self._refresh_display()
 
@@ -821,7 +771,7 @@ class LiveViewApp:
         self.zoom  = new
         self._refresh_display()
 
-    # ── Mode switching ────────────────────────────────────────────────────
+    # Mode switching
     def _set_mode(self, mode: str) -> None:
         self.mode = mode
         self._clear_pts()
@@ -839,8 +789,7 @@ class LiveViewApp:
                                         font=("Helvetica", 8))
             self.tool_title_var.set("🗺  Path Tool")
             self.tool_hint_var.set("Click Start then End — avoids disaster zones")
-
-    # ── Click handler (shared by both modes) ──────────────────────────────
+    
     def _register_click(self, sx: int, sy: int) -> None:
         if self.mosaic_bgr is None:
             return
@@ -895,18 +844,14 @@ class LiveViewApp:
 
         start = self.click_pts[0]
         goal  = self.click_pts[1]
-
-        # Build obstacle map at full mosaic resolution
-        # Dilate obstacles slightly (3px) so path stays away from edges
+        
         obstacle = _build_obstacle_map(self.overlay_bgr, self.ovr_msk)
         kernel   = np.ones((7, 7), np.uint8)
         obstacle = cv2.dilate(obstacle.astype(np.uint8), kernel).astype(bool)
 
-        # A* — run in current thread (fast enough for typical mosaic sizes)
-        # Downsample for speed: run A* on 4× downsampled map, then upsample path
+        # A* — run in current thread
         SCALE = 4
         H, W = obstacle.shape
-        # Downsample with max-pooling: any obstacle in the block → blocked
         sh, sw = (H // SCALE) * SCALE, (W // SCALE) * SCALE
         small_obs = (obstacle[:sh, :sw]
                      .reshape(H // SCALE, SCALE, W // SCALE, SCALE)
@@ -923,9 +868,7 @@ class LiveViewApp:
             self.pt_var.set("Destination completely surrounded by obstacles")
             self.path_pts = []
         else:
-            # Upsample path back to full resolution
             self.path_pts = [(px * SCALE, py * SCALE) for px, py in path_small]
-            # Compute path length
             dist_px = sum(
                 np.sqrt((self.path_pts[i+1][0]-self.path_pts[i][0])**2 +
                         (self.path_pts[i+1][1]-self.path_pts[i][1])**2)
@@ -949,9 +892,6 @@ class LiveViewApp:
         self.dist_var.set("—")
         self.pt_var.set("")
         self._refresh_display()
-
-
-# ── Entry point ───────────────────────────────────────────────────────────
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(

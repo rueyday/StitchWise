@@ -1,14 +1,4 @@
 """
-StitchWise — YOLOv8 Evaluation on RescueNet
-============================================
-Evaluates a fine-tuned YOLOv8 checkpoint on the RescueNet YOLO-format dataset.
-Reports overall mAP50 / mAP50-95, per-class Precision / Recall / mAP50, and a
-confusion summary that flags classes being missed (low recall) vs classes generating
-too many false positives (low precision).
-
-Optionally saves sample prediction images with bounding boxes drawn for manual
-inspection.
-
 Usage:
     python evaluate.py
     python evaluate.py --weights outputs/runs/rescuenet_detect/weights/best.pt
@@ -22,10 +12,6 @@ Requirements:
 import argparse
 import random
 from pathlib import Path
-
-# ---------------------------------------------------------------------------
-# PATHS  (resolved relative to this script, so they work from any cwd)
-# ---------------------------------------------------------------------------
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 REPO_ROOT  = SCRIPT_DIR.parent
@@ -51,11 +37,6 @@ VISUALIZE_SAMPLE_N = 16
 
 # Total number of pipeline steps shown in progress indicators
 N_STEPS = 4
-
-
-# ---------------------------------------------------------------------------
-# ARGUMENT PARSING
-# ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
     _default_weights = str(RUNS_DIR / "rescuenet_detect" / "weights" / "best.pt")
@@ -85,11 +66,6 @@ def parse_args() -> argparse.Namespace:
                         help=f"Save up to {VISUALIZE_SAMPLE_N} annotated prediction "
                              "images to outputs/runs/{name}/visualizations/")
     return parser.parse_args()
-
-
-# ---------------------------------------------------------------------------
-# STEP 1: VALIDATE
-# ---------------------------------------------------------------------------
 
 def validate_setup(weights_path: Path, data_yaml: Path):
     """
@@ -125,13 +101,11 @@ def validate_setup(weights_path: Path, data_yaml: Path):
     print(f"  classes    : {nc} → {names}")
 
     # Verify dataset root is reachable (stale absolute paths are common after
-    # moving the repo, so fall back to the yaml's own directory if needed).
     dataset_root = Path(cfg.get("path", str(data_yaml.parent)))
     if not dataset_root.exists():
         dataset_root = data_yaml.parent
         print(f"  WARNING: data.yaml 'path' not found; using yaml directory: {dataset_root}")
-
-    # --- model ---
+    
     from ultralytics import YOLO
     print(f"\n  Loading model: {weights_path.name} ...")
     model = YOLO(str(weights_path))
@@ -139,11 +113,6 @@ def validate_setup(weights_path: Path, data_yaml: Path):
     print(f"  Model loaded  ✓  ({n_params:,} parameters)")
 
     return model
-
-
-# ---------------------------------------------------------------------------
-# STEP 2: EVALUATE
-# ---------------------------------------------------------------------------
 
 def run_evaluation(args: argparse.Namespace, model, data_yaml: Path, out_dir: Path):
     """
@@ -169,16 +138,11 @@ def run_evaluation(args: argparse.Namespace, model, data_yaml: Path, out_dir: Pa
         project=str(RUNS_DIR),
         name=args.name,
         exist_ok=True,
-        plots=True,    # saves confusion matrix and PR curve to out_dir
+        plots=True,
         verbose=True,
     )
 
     return metrics
-
-
-# ---------------------------------------------------------------------------
-# STEP 3: REPORT + SAVE SUMMARY
-# ---------------------------------------------------------------------------
 
 def _build_report(metrics, args: argparse.Namespace, weights_path: Path) -> str:
     """
@@ -196,8 +160,7 @@ def _build_report(metrics, args: argparse.Namespace, weights_path: Path) -> str:
     per_class_ap50 = [float(v) for v in box.ap50]
 
     lines = []
-
-    # --- Header ---
+    
     lines.append("=" * 62)
     lines.append("StitchWise — RescueNet Evaluation Summary")
     lines.append("=" * 62)
@@ -205,8 +168,7 @@ def _build_report(metrics, args: argparse.Namespace, weights_path: Path) -> str:
     lines.append(f"  split      : {args.split}")
     lines.append(f"  conf / iou : {args.conf} / {args.iou}")
     lines.append("")
-
-    # --- Overall metrics ---
+    
     lines.append("  Overall Results")
     lines.append("  " + "-" * 40)
     lines.append(f"  mAP50      : {box.map50:.4f}")
@@ -214,8 +176,7 @@ def _build_report(metrics, args: argparse.Namespace, weights_path: Path) -> str:
     lines.append(f"  Precision  : {box.mp:.4f}  (mean over all classes)")
     lines.append(f"  Recall     : {box.mr:.4f}  (mean over all classes)")
     lines.append("")
-
-    # --- Per-class breakdown ---
+    
     lines.append("  Per-class Breakdown")
     lines.append("  " + "-" * 40)
     col_w = 32
@@ -292,16 +253,10 @@ def report_and_save(metrics, args: argparse.Namespace,
 
     report_text = _build_report(metrics, args, weights_path)
     print("\n" + report_text)
-
-    # --- Save plain-text summary ---
+    
     summary_path = out_dir / "eval_summary.txt"
     summary_path.write_text(report_text, encoding="utf-8")
     print(f"\n  Summary saved → {summary_path}")
-
-
-# ---------------------------------------------------------------------------
-# STEP 4: VISUALIZE (optional, only runs when --visualize is passed)
-# ---------------------------------------------------------------------------
 
 def visualize_predictions(args: argparse.Namespace, model,
                           data_yaml: Path, out_dir: Path):
@@ -316,14 +271,13 @@ def visualize_predictions(args: argparse.Namespace, model,
 
     print(f"\n[4/{N_STEPS}] Generating visualizations "
           f"(up to {VISUALIZE_SAMPLE_N} images)...")
-
-    # --- Resolve the split's image directory from data.yaml ---
+    
     with open(data_yaml) as f:
         cfg = yaml.safe_load(f)
 
     dataset_root = Path(cfg.get("path", str(data_yaml.parent)))
     if not dataset_root.exists():
-        dataset_root = data_yaml.parent  # fall back to yaml directory
+        dataset_root = data_yaml.parent
 
     split_rel = cfg.get(args.split, f"{args.split}/images")
     img_dir   = dataset_root / split_rel
@@ -332,8 +286,7 @@ def visualize_predictions(args: argparse.Namespace, model,
         print(f"  WARNING: image directory not found: {img_dir}")
         print("  Skipping visualization.")
         return
-
-    # --- Collect and sample image paths ---
+    
     img_paths = (
         list(img_dir.glob("*.jpg")) + list(img_dir.glob("*.JPG")) +
         list(img_dir.glob("*.png")) + list(img_dir.glob("*.PNG"))
@@ -346,8 +299,7 @@ def visualize_predictions(args: argparse.Namespace, model,
     sample = random.sample(img_paths, min(VISUALIZE_SAMPLE_N, len(img_paths)))
     print(f"  Sampling {len(sample)} / {len(img_paths)} images from:")
     print(f"    {img_dir}")
-
-    # --- Run predictions and save annotated images ---
+    
     viz_dir = out_dir / "visualizations"
     viz_dir.mkdir(parents=True, exist_ok=True)
 
@@ -361,17 +313,11 @@ def visualize_predictions(args: argparse.Namespace, model,
             verbose=False,
         )
         for pred in preds:
-            # pred.plot() returns a BGR numpy array with boxes and labels drawn
             annotated = pred.plot()
             cv2.imwrite(str(viz_dir / img_path.name), annotated)
 
     n_saved = len(list(viz_dir.glob("*")))
     print(f"  Saved {n_saved} annotated image(s) → {viz_dir}")
-
-
-# ---------------------------------------------------------------------------
-# MAIN
-# ---------------------------------------------------------------------------
 
 def main():
     args = parse_args()
@@ -392,17 +338,10 @@ def main():
     print(f"  visualize  : {'yes' if args.visualize else 'no'}")
 
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Step 1: Validate weights + data.yaml, load model
+    
     model = validate_setup(weights_path, data_yaml)
-
-    # Step 2: Run model.val()
     metrics = run_evaluation(args, model, data_yaml, out_dir)
-
-    # Step 3: Print report to console and save eval_summary.txt
     report_and_save(metrics, args, weights_path, out_dir)
-
-    # Step 4: Optionally render and save annotated prediction images
     if args.visualize:
         visualize_predictions(args, model, data_yaml, out_dir)
     else:

@@ -1,14 +1,6 @@
 """
 RescueNet Dataset Preparation for YOLOv8
 =========================================
-This script:
-  1. Downloads the RescueNet dataset from Kaggle via kagglehub
-  2. Inspects the dataset structure and class distribution
-  3. Converts grayscale semantic segmentation masks -> YOLO format labels
-       - Detection mode:  one .txt per image with bounding boxes
-       - Segmentation mode: one .txt per image with polygon contours  (stretch goal)
-  4. Tiles large 3000x4000 images into smaller patches (recommended for YOLO)
-  5. Generates data.yaml for Ultralytics YOLOv8
 
 Usage:
     python prepare_rescuenet.py [--mode detect|segment] [--tile] [--tile-size 640]
@@ -25,14 +17,8 @@ import numpy as np
 import yaml
 from tqdm import tqdm
 
-# ---------------------------------------------------------------------------
-# CONFIG
-# ---------------------------------------------------------------------------
-
-# RescueNet class definitions (pixel value -> class name)
-# Index 0 = background (ignored for YOLO labels)
 CLASSES = {
-    0:  "background",          # ignored
+    0:  "background",
     1:  "water",
     2:  "building-no-damage",
     3:  "building-minor-damage",
@@ -45,22 +31,11 @@ CLASSES = {
     10: "pool",
 }
 
-# Classes to INCLUDE in YOLO labels (exclude background and undamaged classes
-# if you only care about disaster-relevant detections).
-# Edit this list to focus on specific classes.
 ACTIVE_CLASSES = [1, 4, 5, 7, 8]  # water, major-damage, total-destruction, road-blocked, vehicle
-# For all classes: ACTIVE_CLASSES = list(range(1, 11))
 
-# Mapping from original class index -> YOLO class index (0-based)
 YOLO_CLASS_MAP = {orig: yolo for yolo, orig in enumerate(ACTIVE_CLASSES)}
 YOLO_CLASS_NAMES = [CLASSES[i] for i in ACTIVE_CLASSES]
-
-# Minimum contour area in pixels to filter noise
 MIN_CONTOUR_AREA = 500
-
-# ---------------------------------------------------------------------------
-# STEP 1: DOWNLOAD
-# ---------------------------------------------------------------------------
 
 def download_dataset(output_dir: Path) -> Path:
     """Download RescueNet from Kaggle using kagglehub."""
@@ -86,11 +61,6 @@ def download_dataset(output_dir: Path) -> Path:
             "Alternatively, download manually and set --dataset-path."
         )
 
-
-# ---------------------------------------------------------------------------
-# STEP 1B: RESOLVE DATASET ROOT
-# ---------------------------------------------------------------------------
-
 def resolve_dataset_root(dataset_path: Path) -> Path:
     """
     Navigate past a single-subfolder wrapper that kagglehub sometimes adds.
@@ -104,11 +74,6 @@ def resolve_dataset_root(dataset_path: Path) -> Path:
             print(f"      Resolved dataset root: {candidate}")
             return candidate
     return dataset_path
-
-
-# ---------------------------------------------------------------------------
-# STEP 2: INSPECT
-# ---------------------------------------------------------------------------
 
 def inspect_dataset(dataset_path: Path):
     """Print dataset structure and class distribution from a sample of masks."""
@@ -162,11 +127,6 @@ def inspect_dataset(dataset_path: Path):
     else:
         print("      WARNING: No mask files found. Check dataset path structure.")
 
-
-# ---------------------------------------------------------------------------
-# STEP 3: FIND IMAGE-MASK PAIRS
-# ---------------------------------------------------------------------------
-
 def find_pairs(dataset_path: Path):
     """
     Return a dict: { 'train': [(img_path, mask_path), ...], 'val': [...], 'test': [...] }
@@ -215,7 +175,7 @@ def find_pairs(dataset_path: Path):
         split_pairs = []
         for img_path in imgs:
             stem = img_path.stem
-            # Try matching mask by same stem, then with common suffixes (_lab)
+            # Try matching mask by same stem
             matched = False
             for suffix in ["", "_lab"]:
                 for ext in [".png", ".PNG"]:
@@ -231,11 +191,6 @@ def find_pairs(dataset_path: Path):
         print(f"      [{split}] matched pairs: {len(split_pairs)}")
 
     return pairs
-
-
-# ---------------------------------------------------------------------------
-# STEP 4A: MASK -> YOLO DETECTION LABELS (bounding boxes)
-# ---------------------------------------------------------------------------
 
 def mask_to_yolo_detect(mask: np.ndarray, img_h: int, img_w: int) -> list[str]:
     """
@@ -264,11 +219,6 @@ def mask_to_yolo_detect(mask: np.ndarray, img_h: int, img_w: int) -> list[str]:
                 lines.append(f"{yolo_cls} {cx:.6f} {cy:.6f} {nw:.6f} {nh:.6f}")
     return lines
 
-
-# ---------------------------------------------------------------------------
-# STEP 4B: MASK -> YOLO SEGMENTATION LABELS (polygons) - stretch goal
-# ---------------------------------------------------------------------------
-
 def mask_to_yolo_segment(mask: np.ndarray, img_h: int, img_w: int) -> list[str]:
     """
     Convert a grayscale segmentation mask to YOLO segmentation format lines.
@@ -296,17 +246,8 @@ def mask_to_yolo_segment(mask: np.ndarray, img_h: int, img_w: int) -> list[str]:
             lines.append(f"{yolo_cls} " + " ".join(coords))
     return lines
 
-
-# ---------------------------------------------------------------------------
-# STEP 4C: OPTIONAL TILING (recommended for 3000x4000 images)
-# ---------------------------------------------------------------------------
-
 def tile_image_and_mask(img: np.ndarray, mask: np.ndarray,
                          tile_size: int, overlap: int = 64):
-    """
-    Yield (tile_img, tile_mask, x_offset, y_offset) patches.
-    overlap: pixel overlap between adjacent tiles to avoid border artifacts.
-    """
     if overlap >= tile_size:
         raise ValueError(f"overlap ({overlap}) must be less than tile_size ({tile_size})")
     h, w = img.shape[:2]
@@ -318,11 +259,6 @@ def tile_image_and_mask(img: np.ndarray, mask: np.ndarray,
             y1 = max(0, y2 - tile_size)
             x1 = max(0, x2 - tile_size)
             yield img[y1:y2, x1:x2], mask[y1:y2, x1:x2], x1, y1
-
-
-# ---------------------------------------------------------------------------
-# STEP 4: MAIN CONVERSION
-# ---------------------------------------------------------------------------
 
 def sample_pairs(pairs: dict, img_num: int | None) -> dict:
     """
@@ -373,7 +309,6 @@ def convert_dataset(pairs: dict, output_dir: Path, mode: str = "detect",
                      img_num: int | None = None):
     """Convert all image/mask pairs to YOLO format."""
 
-    # Apply sampling BEFORE conversion so we only process what we need
     if img_num is not None:
         print(f"\n[3/5] Converting masks to YOLO {mode} format "
               f"(limited to {img_num} source images)...")
@@ -437,11 +372,6 @@ def convert_dataset(pairs: dict, output_dir: Path, mode: str = "detect",
     print(f"        Label entries  : {stats['total_labels']}")
     print(f"        Skipped (bad)  : {stats['skipped']}")
 
-
-# ---------------------------------------------------------------------------
-# STEP 5: GENERATE data.yaml
-# ---------------------------------------------------------------------------
-
 def generate_data_yaml(output_dir: Path, mode: str):
     """Write the data.yaml file that YOLOv8 expects."""
     print("\n[4/5] Generating data.yaml...")
@@ -467,11 +397,6 @@ def generate_data_yaml(output_dir: Path, mode: str):
     print(f"      Classes ({len(YOLO_CLASS_NAMES)}): {YOLO_CLASS_NAMES}")
     return yaml_path
 
-
-# ---------------------------------------------------------------------------
-# STEP 6: SANITY CHECK
-# ---------------------------------------------------------------------------
-
 def sanity_check(output_dir: Path):
     """Quick check: verify a few label files look reasonable."""
     print("\n[5/5] Running sanity check...")
@@ -493,11 +418,6 @@ def sanity_check(output_dir: Path):
     empty = sum(1 for lf in label_files if lf.stat().st_size == 0)
     print(f"\n      Total label files : {len(label_files)}")
     print(f"      Empty label files : {empty}  (tiles with no active classes — expected)")
-
-
-# ---------------------------------------------------------------------------
-# MAIN
-# ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(description="Prepare RescueNet for YOLOv8")
@@ -529,45 +449,34 @@ def main():
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Convert 0 -> None (sentinel for "full dataset")
     img_num = args.img_num if args.img_num > 0 else None
 
-    # Step 1: Download or use provided path
     if args.dataset_path:
         dataset_path = Path(args.dataset_path)
         print(f"[1/5] Using provided dataset path: {dataset_path}")
     else:
         dataset_path = download_dataset(output_dir)
 
-    # Resolve past any single-subfolder wrapper (e.g. versions/1/RescueNet/)
     dataset_path = resolve_dataset_root(dataset_path)
-
-    # Step 2: Inspect
     inspect_dataset(dataset_path)
 
     if args.inspect_only:
         print("\nInspect-only mode. Exiting.")
         return
-
-    # Step 3: Find pairs
+    
     print("\n[2.5/5] Finding image-mask pairs...")
     pairs = find_pairs(dataset_path)
     if not pairs or not any(pairs.values()):
         raise RuntimeError("No image-mask pairs found. Check dataset structure.")
-
-    # Step 4: Convert
+    
     if img_num is not None:
         print(f"\n      --img-num={img_num}: sampling {img_num} source images "
               f"(~{img_num * 20:,} tiles estimated after tiling)")
     convert_dataset(pairs, output_dir, mode=args.mode,
                     tile=args.tile, tile_size=args.tile_size,
                     img_num=img_num)
-
-    # Step 5: data.yaml
+    
     yaml_path = generate_data_yaml(output_dir, mode=args.mode)
-
-    # Step 6: Sanity check
     sanity_check(output_dir)
 
     print(f"""

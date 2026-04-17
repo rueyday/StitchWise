@@ -1,10 +1,6 @@
 """
 Depth Anything V2 (Metric Outdoor) wrapper for metric scale estimation.
 
-Used as fallback when EXIF extrinsics are unavailable or incomplete.
-The metric outdoor model returns absolute depth in meters, so the median
-depth over the image center approximates the camera's AGL altitude.
-
 Model: depth-anything/Depth-Anything-V2-Metric-Outdoor-Large-hf
   - Returns depth in meters
   - Trained on outdoor scenes including aerial-adjacent views
@@ -57,20 +53,6 @@ def estimate_depth(image_path: str | Path) -> np.ndarray:
 
 
 def estimate_altitude_from_depth(depth_map: np.ndarray, center_fraction: float = 0.5) -> float:
-    """
-    Estimate AGL altitude from depth map.
-
-    For a nadir-pointing camera over flat terrain, the ground depth ≈ altitude.
-    We use the median of the central region (where ground is most likely visible)
-    as the altitude estimate.
-
-    Args:
-        depth_map: H×W float32 depth in meters
-        center_fraction: fraction of the image center to use for median
-
-    Returns:
-        Estimated altitude in meters
-    """
     h, w = depth_map.shape
     pad_h = int(h * (1 - center_fraction) / 2)
     pad_w = int(w * (1 - center_fraction) / 2)
@@ -97,10 +79,6 @@ def estimate_gsd(
         focal_px = focal_length_mm / sensor_width_mm * image_width_px
         gsd = altitude_m / focal_px
     else:
-        # Without focal length we can't compute GSD from just altitude.
-        # Use depth gradient as a proxy: the width of the scene at ground level
-        # is depth × 2 × tan(hfov/2). Without hfov this is indeterminate.
-        # We fall back to a rough estimate assuming 90° HFOV (common wide-angle UAV).
         import math
         assumed_hfov_rad = math.radians(90)
         scene_width_m = 2 * altitude_m * math.tan(assumed_hfov_rad / 2)

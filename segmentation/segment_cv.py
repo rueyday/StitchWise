@@ -1,10 +1,5 @@
 """
-RapidGeoStitch — Classical CV segmentation (no extra model weights).
-
-  Water        : Otsu on LAB L-channel + HSV hue mask
-  Building     : GrabCut + ellipse morph-close
-  Road blocked : GrabCut + elongated directional kernel
-  Vehicle      : GrabCut + morph-open
+RapidGeoStitch — Classical CV segmentation
 
 Usage:
     python segment_cv.py --source path/to/image.jpg
@@ -20,17 +15,11 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-# ---------------------------------------------------------------------------
-# PATHS
-# ---------------------------------------------------------------------------
 SCRIPT_DIR = Path(__file__).parent.resolve()
 REPO_ROOT = SCRIPT_DIR.parent
 DEFAULT_YOLO_WEIGHTS = REPO_ROOT / "detection" / "model" / "best.pt"
 OUTPUT_DIR = REPO_ROOT / "outputs" / "runs" / "cv_segmentation"
 
-# ---------------------------------------------------------------------------
-# CLASS METADATA
-# ---------------------------------------------------------------------------
 CLASS_NAMES = {
     0: "water",
     1: "building-major-damage",
@@ -47,18 +36,10 @@ CLASS_COLORS = {
     4: (  0, 210,   0),
 }
 
-# ---------------------------------------------------------------------------
-# HYPER-PARAMETERS
-# ---------------------------------------------------------------------------
 BOX_PAD_FRAC = 0.15
 GRABCUT_ITER = 3
 MIN_BOX_PX   = 12
 MAX_GC_DIM   = 150
-
-
-# ===========================================================================
-# INTERNAL HELPERS
-# ===========================================================================
 
 def _padded_crop(image: np.ndarray, x1: int, y1: int, x2: int, y2: int,
                  pad_frac: float = BOX_PAD_FRAC):
@@ -135,11 +116,6 @@ def _paste_mask(full_h: int, full_w: int,
     out = np.zeros((full_h, full_w), np.uint8)
     out[cy1:cy2, cx1:cx2] = crop_mask
     return out
-
-
-# ===========================================================================
-# PER-CLASS SEGMENTERS
-# ===========================================================================
 
 def segment_water(image: np.ndarray, box: tuple) -> np.ndarray:
     x1, y1, x2, y2 = box
@@ -218,11 +194,6 @@ def segment_vehicle(image: np.ndarray, box: tuple) -> np.ndarray:
     gc_mask = cv2.morphologyEx(gc_mask, cv2.MORPH_OPEN, kernel)
     return _paste_mask(H, W, gc_mask, crop_coords)
 
-
-# ===========================================================================
-# PUBLIC API
-# ===========================================================================
-
 def segment(image: np.ndarray, boxes: list, class_ids: list) -> tuple:
     H, W = image.shape[:2]
     semantic_map = np.zeros((H, W), dtype=np.uint8)
@@ -281,18 +252,8 @@ def visualize(image: np.ndarray, semantic_map: np.ndarray, detected: np.ndarray,
 
     return vis
 
-
-# ===========================================================================
-# PIPELINE
-# ===========================================================================
-
 def process_image(img_path: Path, yolo_model, out_dir: Path,
                   conf: float) -> tuple:
-    """
-    Run the full two-stage pipeline on one image.
-
-    Returns (semantic_map, elapsed_seconds) or (None, 0.0) if skipped.
-    """
     print(f"Processing: {img_path.name}")
 
     image = cv2.imread(str(img_path))
@@ -321,11 +282,6 @@ def process_image(img_path: Path, yolo_model, out_dir: Path,
 
     print(f"  └─ CV seg done in {elapsed * 1000:.1f} ms  →  {out_dir}")
     return semantic_map, elapsed
-
-
-# ===========================================================================
-# BENCHMARK
-# ===========================================================================
 
 def _iou(mask_a: np.ndarray, mask_b: np.ndarray) -> float:
     intersection = (mask_a & mask_b).sum()
@@ -363,9 +319,8 @@ def run_benchmark(args):
     sam_masks_dir = Path(args.sam_masks) if args.sam_masks else None
 
     cv_times, sam_times = [], []
-    # per-class IoU lists; filled only when a reference mask is available
-    per_class_iou_cv  = {c: [] for c in range(5)}   # CV vs reference
-    per_class_iou_sam = {c: [] for c in range(5)}   # SAM vs reference (if live SAM)
+    per_class_iou_cv  = {c: [] for c in range(5)}
+    per_class_iou_sam = {c: [] for c in range(5)}
 
     for img_path in images:
         image = cv2.imread(str(img_path))
@@ -379,13 +334,11 @@ def run_benchmark(args):
 
         boxes     = yolo_results.boxes.xyxy.tolist()
         class_ids = yolo_results.boxes.cls.tolist()
-
-        # --- CV timing ---
+        
         t0 = time.perf_counter()
         cv_map, _ = segment(image, boxes, class_ids)
         cv_times.append(time.perf_counter() - t0)
-
-        # --- SAM (live) timing + map ---
+        
         sam_map = None
         if sam_model is not None:
             t0 = time.perf_counter()
@@ -396,25 +349,20 @@ def run_benchmark(args):
             if sam_res.masks is not None:
                 for i, m in enumerate(sam_res.masks.data.cpu().numpy()):
                     sam_map[m > 0.5] = int(class_ids[i])
-
-        # --- Load pre-computed SAM masks if dir provided ---
+        
         if sam_masks_dir is not None and sam_map is None:
             candidate = sam_masks_dir / f"mask_{img_path.stem}.png"
             if candidate.exists():
                 loaded = cv2.imread(str(candidate), cv2.IMREAD_GRAYSCALE)
                 if loaded is not None and loaded.shape == cv_map.shape:
                     sam_map = loaded
-
-        # --- Compute IoU per detected class ---
+        
         if sam_map is not None:
             for cls_id in {int(c) for c in class_ids}:
                 iou_cv = _iou(cv_map == cls_id, sam_map == cls_id)
                 if not np.isnan(iou_cv):
                     per_class_iou_cv[cls_id].append(iou_cv)
-
-    # -----------------------------------------------------------------------
-    # Report
-    # -----------------------------------------------------------------------
+    
     print("\n" + "=" * 60)
     print("BENCHMARK RESULTS")
     print("=" * 60)
@@ -442,11 +390,6 @@ def run_benchmark(args):
             print(f"  {'mean IoU':30s}  {np.mean(all_ious):.3f}")
 
     print("=" * 60)
-
-
-# ===========================================================================
-# CLI
-# ===========================================================================
 
 def parse_args():
     p = argparse.ArgumentParser(
@@ -488,10 +431,7 @@ def main():
     if args.benchmark:
         run_benchmark(args)
         return
-
-    # ------------------------------------------------------------------
-    # Normal inference mode
-    # ------------------------------------------------------------------
+    
     out_dir = Path(args.out_dir)
     (out_dir / "visualizations").mkdir(parents=True, exist_ok=True)
     (out_dir / "masks").mkdir(parents=True, exist_ok=True)

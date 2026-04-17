@@ -5,7 +5,6 @@ from typing import Optional
 
 import exifread
 
-# Sensor width (mm) by DJI camera model; fallback = 1/2.3" sensor
 SENSOR_DB: dict[str, float] = {
     "FC220":   6.17,   # Mavic Pro
     "FC330":   6.17,   # Phantom 4

@@ -1,15 +1,6 @@
 """
 StitchWise — YOLOv8 Fine-tuning on RescueNet
 =============================================
-Fine-tunes a pretrained YOLOv8 checkpoint on the RescueNet dataset for
-aerial disaster damage detection.
-
-Phased training strategy:
-  Phase 1 (epochs 1..freeze_epochs): backbone frozen, head trained only.
-  Phase 2 (freeze_epochs+1..epochs): full model fine-tuned end-to-end.
-
-  Phase 1 weights are saved under outputs/runs/{name}_phase1/.
-  Phase 2 (final) weights are saved under outputs/runs/{name}/.
 
 Usage:
     python train.py
@@ -26,31 +17,14 @@ import argparse
 import sys
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# PATHS  (resolved relative to this script, so they work from any cwd)
-# ---------------------------------------------------------------------------
-
 SCRIPT_DIR = Path(__file__).parent.resolve()
 REPO_ROOT  = SCRIPT_DIR.parent
 DATA_YAML  = REPO_ROOT / "data" / "rescuenet_yolo" / "data.yaml"
 RUNS_DIR   = REPO_ROOT / "outputs" / "runs"
 
-# YOLOv8 backbone occupies the first 10 layers (indices 0–9).
 FREEZE_BACKBONE_LAYERS = 10
-
-# Default number of frozen-backbone epochs before full fine-tuning.
 DEFAULT_FREEZE_EPOCHS = 10
 
-# ---------------------------------------------------------------------------
-# AUGMENTATION  (aerial-specific overrides for YOLO defaults)
-# ---------------------------------------------------------------------------
-
-# Aerial / nadir imagery considerations:
-#   - NO rotation: drone images are already nadir-facing; random rotation
-#     would produce unrealistic diagonal buildings and confuse the model.
-#   - NO perspective / shear: nadir images have minimal projective distortion.
-#   - Vertical flip IS valid: there is no canonical "up" when looking straight down.
-#   - Strong mosaic: helps on small datasets by synthesising varied scenes.
 AERIAL_AUGMENT = {
     "degrees":     0.0,   # disable rotation
     "perspective": 0.0,   # disable perspective warp
@@ -64,11 +38,6 @@ AERIAL_AUGMENT = {
     "hsv_s":       0.7,   # saturation jitter
     "hsv_v":       0.4,   # brightness jitter
 }
-
-
-# ---------------------------------------------------------------------------
-# ARGUMENT PARSING
-# ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -100,21 +69,9 @@ def parse_args() -> argparse.Namespace:
                         help="Validate data.yaml and model without starting training")
     return parser.parse_args()
 
-
-# ---------------------------------------------------------------------------
-# STEP 1: VALIDATE
-# ---------------------------------------------------------------------------
-
 def validate_setup(data_yaml: Path, model_name: str):
-    """
-    Verify that data.yaml exists, all split directories are reachable,
-    and the requested model checkpoint can be loaded.
-
-    Returns the loaded YOLO model object.
-    """
     print("\n[1/3] Validating setup...")
-
-    # --- data.yaml ---
+    
     if not data_yaml.exists():
         raise FileNotFoundError(
             f"data.yaml not found at: {data_yaml}\n"
@@ -132,7 +89,6 @@ def validate_setup(data_yaml: Path, model_name: str):
 
     dataset_root = Path(cfg.get("path", data_yaml.parent))
     if not dataset_root.exists():
-        # Absolute path is stale (dataset was moved) — fall back to yaml's own directory
         dataset_root = data_yaml.parent
         print(f"  WARNING: data.yaml 'path' not found; using yaml directory instead: {dataset_root}")
     all_splits_ok = True
@@ -152,8 +108,7 @@ def validate_setup(data_yaml: Path, model_name: str):
             "One or more dataset splits are missing. "
             "Re-run prepare_rescuenet.py to regenerate them."
         )
-
-    # --- model ---
+    
     from ultralytics import YOLO
     print(f"\n  Loading checkpoint: {model_name} ...")
     model = YOLO(model_name)
@@ -161,11 +116,6 @@ def validate_setup(data_yaml: Path, model_name: str):
     print(f"  Model loaded       ✓  ({n_params:,} parameters)")
 
     return model
-
-
-# ---------------------------------------------------------------------------
-# STEP 2: TRAIN
-# ---------------------------------------------------------------------------
 
 def _common_train_kwargs(args: argparse.Namespace, data_yaml: Path) -> dict:
     """Build the kwargs shared by both training phases."""
@@ -183,19 +133,10 @@ def _common_train_kwargs(args: argparse.Namespace, data_yaml: Path) -> dict:
 
 
 def train(args: argparse.Namespace, model, data_yaml: Path):
-    """
-    Run training according to args. Returns (results, best_pt_path).
-
-    Three modes:
-      resume       — load last.pt and continue; Ultralytics restores all args.
-      single-phase — freeze_epochs == 0 (or >= total_epochs); one model.train() call.
-      two-phase    — freeze_epochs in (0, total_epochs); head-only then full fine-tune.
-    """
     from ultralytics import YOLO
 
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
-
-    # ---- RESUME --------------------------------------------------------
+    
     if args.resume:
         last_pt = RUNS_DIR / args.name / "weights" / "last.pt"
         if not last_pt.exists():
@@ -212,7 +153,6 @@ def train(args: argparse.Namespace, model, data_yaml: Path):
     kwargs = _common_train_kwargs(args, data_yaml)
     use_phased = 0 < args.freeze_epochs < args.epochs
 
-    # ---- TWO-PHASE: frozen head → full fine-tune -----------------------
     if use_phased:
         phase1_name = f"{args.name}_phase1"
         phase1_dir  = RUNS_DIR / phase1_name
@@ -256,10 +196,7 @@ def train(args: argparse.Namespace, model, data_yaml: Path):
         )
         best_pt = phase2_dir / "weights" / "best.pt"
 
-    # ---- SINGLE-PHASE --------------------------------------------------
     else:
-        # freeze_epochs == 0 → no freezing at all
-        # freeze_epochs >= total_epochs → freeze for entire run (head-only training)
         freeze = FREEZE_BACKBONE_LAYERS if args.freeze_epochs >= args.epochs else None
 
         phase_label = (
@@ -282,11 +219,6 @@ def train(args: argparse.Namespace, model, data_yaml: Path):
 
     return results, best_pt
 
-
-# ---------------------------------------------------------------------------
-# STEP 3: REPORT
-# ---------------------------------------------------------------------------
-
 def report(best_pt: Path, results):
     """Print a summary of training results and the path to best weights."""
     print(f"\n{'='*62}")
@@ -296,13 +228,11 @@ def report(best_pt: Path, results):
     if best_pt.exists():
         print(f"  Best weights : {best_pt}")
     else:
-        # Fallback if best.pt wasn't written (e.g. very short runs)
         last_pt = best_pt.parent / "last.pt"
         print(f"  WARNING: best.pt not found at {best_pt}")
         if last_pt.exists():
             print(f"  last.pt      : {last_pt}  (use this instead)")
-
-    # Print key metrics if available
+    
     try:
         box = results.results_dict
         print(f"\n  mAP50      : {box.get('metrics/mAP50(B)',    'n/a'):.4f}")
@@ -315,11 +245,6 @@ def report(best_pt: Path, results):
     print(f"\n  Next step — evaluate on the test split:")
     print(f"    python evaluate.py --weights {best_pt} --data {DATA_YAML}")
     print(f"{'='*62}\n")
-
-
-# ---------------------------------------------------------------------------
-# MAIN
-# ---------------------------------------------------------------------------
 
 def main():
     args = parse_args()
@@ -335,18 +260,14 @@ def main():
     print(f"  device       : {args.device}")
     print(f"  run name     : {args.name}")
     print(f"  output root  : {RUNS_DIR}")
-
-    # Step 1: validate
+    
     model = validate_setup(data_yaml, args.model)
 
     if args.dry_run:
         print("\n[Dry-run] All checks passed. Exiting without training.")
         sys.exit(0)
-
-    # Step 2: train
+    
     results, best_pt = train(args, model, data_yaml)
-
-    # Step 3: report
     report(best_pt, results)
 
 
