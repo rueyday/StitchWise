@@ -1,8 +1,8 @@
 # RapidGeoStitch
 
-Real-time disaster mapping from UAV imagery. RapidGeoStitch stitches consecutive drone frames into a georeferenced mosaic while detecting and segmenting disaster zones — flooding, damaged buildings, blocked roads, and vehicles — and overlaying them live as the mosaic builds.
+Real-time disaster mapping from UAV imagery. RapidGeoStitch stitches consecutive drone frames into a georeferenced mosaic while segmenting disaster zones and overlaying them live as the mosaic builds.
 
----
+![Alt Text](https://drive.google.com/uc?export=view&id=1_FRo-IeENbknfFpJ4ITxd_zMwTdFtmmc)
 
 ## Overview
 
@@ -15,16 +15,13 @@ RapidGeoStitch chains four modules into a single live GUI:
 | 3. Segmentation | `segmentation/segment_cv.py` | Classical CV per-class masking inside YOLO boxes (no GPU required) |
 | 4. Stitching | `src/stitchwise/` | SIFT feature matching → RANSAC homographies → global pose solve → warp mosaic |
 
-The result is a zoomable, pannable mosaic with colour-coded disaster overlays and two interactive tools: distance measurement and A\* shortest-path routing that avoids all hazard zones.
-
----
+The result is a pannable mosaic with color-coded disaster overlays and two interactive tools: distance measurement and A\* shortest-path routing that avoids all hazard zones.
 
 ## Project Structure
 
 ```
 RapidGeoStitch/
 ├── live_view.py                 # Main entry point — GUI + pipeline orchestrator
-│
 ├── detection/
 │   ├── model/best.pt            # Final YOLOv8 weights (rescuenet_v2, 4 classes)
 │   ├── predict.py               # Tiled inference + cross-tile NMS
@@ -33,13 +30,13 @@ RapidGeoStitch/
 │   └── evaluate.py              # Evaluation script
 │
 ├── segmentation/
-│   └── segment_cv.py            # Classical CV segmenter (water/buildings/roads/vehicles)
+│   └── segment_cv.py            # Classical CV segmenter
 │
 ├── src/
 │   ├── metric_scale.py          # GSD estimation from EXIF
 │   ├── exif_extractor.py        # EXIF parser
-│   ├── depth_model.py           # Depth Anything V2 fallback (no EXIF)
-│   └── stitchwise/              # Stitching library (Zhaochen)
+│   ├── depth_model.py           # Depth Anything V2 fallback
+│   └── stitchwise/              # Stitching library
 │       ├── features.py          # SIFT extraction
 │       ├── matching.py          # Feature matching
 │       ├── geometry.py          # Homography estimation
@@ -51,18 +48,15 @@ RapidGeoStitch/
 │
 ├── scripts/
 │   ├── build_pair_graph.py      # Build SIFT match graph from image directory
-│   ├── solve_global_no_ba.py    # Solve global poses (no bundle adjustment)
+│   ├── solve_global_no_ba.py    # Solve global poses
 │   ├── render_global_no_ba.py   # Render final mosaic from cached poses
 │   ├── validate_global_no_ba.py # Validate reprojection errors
 │   └── ...
 │
 ├── configs/
 │   └── stitching.yaml           # Stitching hyper-parameters
-│
 └── requirements.txt
 ```
-
----
 
 ## Disaster Classes
 
@@ -75,8 +69,6 @@ The model detects 4 classes matching the RescueNet dataset:
 | 2 | Road Blocked | Orange |
 | 3 | Vehicle | Green |
 
----
-
 ## Setup
 
 ### Prerequisites
@@ -88,30 +80,24 @@ The model detects 4 classes matching the RescueNet dataset:
 ### Install
 
 ```bash
-# 1. Create venv (use a short path on Windows to avoid MAX_PATH issues)
 python -m venv C:/sw_env          # Windows
 python -m venv venv               # macOS/Linux
 
-# 2. Activate
 C:/sw_env/Scripts/activate        # Windows
 source venv/bin/activate          # macOS/Linux
 
-# 3. Install PyTorch (CPU)
+# Install PyTorch (CPU)
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
-# 4. Install remaining dependencies
+# Install remaining dependencies
 pip install -r requirements.txt
 ```
-
----
 
 ## Running the GUI
 
 ```bash
 python live_view.py --image-dir data/rescuenet_big --ext .jpg
 ```
-
-The GUI opens immediately. Stitching runs in a background thread — frames appear one by one as they are registered and warped.
 
 ### All options
 
@@ -127,14 +113,6 @@ The GUI opens immediately. Stitching runs in a background thread — frames appe
 --fresh               Delete cached stitching results and rebuild from scratch
 ```
 
-### Caching
-
-After the first run, pair-graph and global poses are cached in `--output-dir`. Subsequent runs on the same dataset reuse the cache automatically — the GUI opens in seconds and plays back frame-by-frame without recomputing.
-
-Use `--fresh` to force a full rebuild.
-
----
-
 ## GUI Controls
 
 | Action | Control |
@@ -143,17 +121,13 @@ Use `--fresh` to force a full rebuild.
 | Zoom | Scroll wheel (cursor-anchored) |
 | Fit to window | Double-click or **Fit** button |
 | Switch tool | **Measure** / **Path** buttons |
-| Measure distance | Measure mode → click two points → distance shown in metres |
-| Find shortest path | Path mode → click start → click end → orange route drawn |
+| Measure distance | two points distance shown in meters |
+| Find shortest path | two points shortest path in orange 
 | Clear points | **Clear** button |
 
 ### Path Tool
 
-The Path tool finds the shortest safe route between two clicked points using A\* search. Every detected disaster zone (water, damaged buildings, blocked roads) is treated as an obstacle. Only **Vehicle** zones are passable. If the destination is unreachable, the path terminates at the nearest accessible cell.
-
-Path distance is reported in metres using the estimated mosaic GSD.
-
----
+The Path tool finds the shortest safe route between two clicked points using A\* search. If the destination is unreachable, the path terminates at the nearest accessible cell. Path distance is reported in meters using the estimated mosaic GSD.
 
 ## Output
 
@@ -161,13 +135,11 @@ Each run saves:
 
 ```
 outputs/<run-name>/
-├── pair_graph/              SIFT match graph (cached)
+├── pair_graph/              SIFT match graph
 ├── global_no_ba/
-│   └── global_poses.json    Homographies for all frames (cached)
+│   └── global_poses.json    Homographies for all frames
 └── final_mosaic.jpg         Full disaster overlay mosaic (JPEG 95%)
 ```
-
----
 
 ## Training the Detection Model
 
@@ -184,18 +156,13 @@ python detection/train.py --data configs/rescuenet.yaml --epochs 100
 python detection/evaluate.py --weights detection/model/best.pt
 ```
 
-### Model Details
-
+Model Details
 - Architecture: YOLOv8n (nano)
-- Weights: `detection/model/best.pt` (49.6 MB, `rescuenet_v2`)
 - Inference: tiled 640 px crops with 64 px overlap; cross-tile NMS via `torchvision.ops.batched_nms`
-- Device: auto-selected (CUDA → MPS → CPU)
-
----
 
 ## Segmentation
 
-Classical CV segmentation runs inside every YOLO bounding box — no additional model weights required.
+Classical CV segmentation runs inside every YOLO bounding box
 
 | Class | Method |
 |-------|--------|
@@ -204,23 +171,8 @@ Classical CV segmentation runs inside every YOLO bounding box — no additional 
 | Road Blocked | GrabCut + elongated kernel aligned to road axis |
 | Vehicle | GrabCut + morph-open (noise removal) |
 
-Large crops are downscaled to ≤150 px before GrabCut and upscaled back, keeping per-frame segmentation under ~50 ms on CPU.
-
----
-
-## Team
-
-| Contributor | Module |
-|-------------|--------|
-| Ruey-Day | Metric scale, system integration, GUI, pathfinding |
-| Raphael | YOLOv8 detection model (training + tiled inference) |
-| Kane | Classical CV segmentation |
-| Zhaochen | SIFT/RANSAC stitching library |
-
----
+Large crops are downscaled to ≤150 px before GrabCut and upscaled back.
 
 ## Dataset
 
 Tested on [RescueNet](https://github.com/BinaLab/RescueNet-Challenge) consecutive UAV sequences extracted from the training split (images 10850–10941). The test split is non-consecutive and unsuitable for stitching.
-
-Recommended test sequence: `data/rescuenet_big` (81 consecutive frames).
