@@ -1,7 +1,25 @@
-/data
-/results
-/outputs
-/uploads
+# datasets and run outputs
+/data/
+/results/
+/outputs/
+/uploads/
+
+# Python
 __pycache__/
 *.pyc
-# *.pt   # weights tracked explicitly
+*.pyo
+.Python
+*.egg-info/
+
+# model checkpoints (weights tracked explicitly)
+models/checkpoints/
+*.pt
+!detection/model/best.pt
+
+# env / IDE
+.env
+.venv
+venv/
+*.log
+.vscode/
+.idea/

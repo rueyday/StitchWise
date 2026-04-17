@@ -1,25 +1,23 @@
 """
-StitchWise — Live Disaster Map Viewer
-======================================
+RapidGeoStitch — Live Disaster Map Viewer
+==========================================
 Pipeline per image:
-  1. Metric scale  — estimate GSD (m/px) from EXIF or depth fallback
-  2. YOLO detect   — tiled inference (Raphael) → bounding boxes in image coords
-  3. CV segment    — classical CV per-class masking within YOLO boxes (Kane)
-  4. Stitch        — warp image onto growing mosaic (Zhaochen)
-  5. Overlay       — project masks onto mosaic canvas and composite
+  1. Metric scale  — GSD estimation from EXIF (m/px)
+  2. YOLO detect   — tiled inference → bounding boxes (Raphael)
+  3. CV segment    — classical CV per-class masking (Kane)
+  4. Stitch        — SIFT/RANSAC global mosaic (Zhaochen)
+  5. Overlay       — disaster masks composited onto mosaic canvas
 
 GUI controls:
   Drag           — pan
   Scroll wheel   — zoom (anchored at cursor)
-  Double-click   — fit whole mosaic to window
-  Left-click ×2  — measure ground distance (metres)
-  Fit / Clear    — buttons in right panel
+  Double-click   — fit to window
+  Left-click ×2  — measure (Measure mode) or route (Path mode)
 
 Usage:
-    python live_view.py --image-dir data/rescuenet_test --ext .jpg
-    python live_view.py --image-dir data/rescuenet_test --n-frames 10 --ext .jpg
-    python live_view.py --image-dir data/rescuenet_test --no-seg    # skip detection/segmentation
-    python live_view.py --image-dir data/rescuenet_test --fresh     # force rebuild stitching cache
+    python live_view.py --image-dir data/rescuenet_big --ext .jpg
+    python live_view.py --image-dir data/rescuenet_big --no-seg
+    python live_view.py --image-dir data/rescuenet_big --fresh
 """
 
 from __future__ import annotations
@@ -37,7 +35,7 @@ from tkinter import ttk
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont, ImageTk
+from PIL import Image, ImageDraw, ImageTk
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -60,11 +58,11 @@ CLASS_BGR: dict[int, tuple] = {
 }
 CLASS_RGB: dict[int, tuple] = {k: (v[2], v[1], v[0]) for k, v in CLASS_BGR.items()}
 
-OVERLAY_ALPHA          = 0.45
-STITCHING_RESIZE_MAX_DIM = 1600
-RENDER_MAX_SIDE        = 4000
-RENDER_MAX_AREA        = 16_000_000
-DISPLAY_W, DISPLAY_H   = 960, 700    # initial canvas size
+OVERLAY_ALPHA   = 0.45
+RENDER_MAX_SIDE = 4000
+RENDER_MAX_AREA = 16_000_000
+DISPLAY_W       = 960
+DISPLAY_H       = 700
 
 # Auto-select GPU if available, fall back to CPU
 import torch as _torch
@@ -310,23 +308,15 @@ def pipeline_worker(
 
                         if _CV_SEG_AVAILABLE:
                             try:
-                                # Dispatch table: Raphael's 4-class IDs → Kane's segmenters
-                                # 0=Water, 1=Bldg Damaged, 2=Road Blocked, 3=Vehicle
-                                _dispatch = {
-                                    0: lambda img, b: segment_water(img, b),
-                                    1: lambda img, b: segment_building(img, b, morph_size=7),
-                                    2: lambda img, b: segment_road(img, b),
-                                    3: lambda img, b: segment_vehicle(img, b),
-                                }
                                 for box, cls_id in zip(boxes, classes):
                                     cls_id = int(cls_id)
-                                    fn = _dispatch.get(cls_id)
-                                    if fn is None:
-                                        continue
                                     x1, y1, x2, y2 = (int(v) for v in box)
-                                    # segment on full-res, returns full-res mask
-                                    mask_full = fn(orig_bgr, (x1, y1, x2, y2))
-                                    # scale mask to processed dims
+                                    b = (x1, y1, x2, y2)
+                                    if   cls_id == 0: mask_full = segment_water(orig_bgr, b)
+                                    elif cls_id == 1: mask_full = segment_building(orig_bgr, b, morph_size=7)
+                                    elif cls_id == 2: mask_full = segment_road(orig_bgr, b)
+                                    elif cls_id == 3: mask_full = segment_vehicle(orig_bgr, b)
+                                    else: continue
                                     mask_proc = cv2.resize(
                                         mask_full.astype(np.uint8), (tw, th),
                                         interpolation=cv2.INTER_NEAREST)
@@ -987,10 +977,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--no-seg",  action="store_true",
                    help="Skip detection + segmentation (plain stitching)")
     p.add_argument("--fresh",   action="store_true",
-                   help="Force rebuild pair graph even if cache exists")
-    # Legacy alias kept for backward compat (does nothing — cache is now auto-reused)
-    p.add_argument("--reuse",   action="store_true",
-                   help=argparse.SUPPRESS)
+                   help="Force rebuild stitching cache even if one exists")
     return p.parse_args()
 
 
