@@ -42,12 +42,9 @@ def load_config(config_path: str | Path) -> StitchingConfig:
     with config_path.open("r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
 
-    default_data_dir = "C:/Users/yzc29/OneDrive/Desktop/StitchWise/data/raw/Aerial234"
-    default_output_dir = "C:/Users/yzc29/OneDrive/Desktop/StitchWise/outputs/pairwise"
-
     return StitchingConfig(
-        data_dir=str(_nested_get(raw, ("paths", "data_dir"), default_data_dir)),
-        output_dir=str(_nested_get(raw, ("paths", "output_dir"), default_output_dir)),
+        data_dir=str(_nested_get(raw, ("paths", "data_dir"), "data")),
+        output_dir=str(_nested_get(raw, ("paths", "output_dir"), "outputs/pairwise")),
         image1=str(_nested_get(raw, ("pair", "image1"), "001.JPG")),
         image2=str(_nested_get(raw, ("pair", "image2"), "002.JPG")),
         resize_max_dim=int(_nested_get(raw, ("preprocess", "resize_max_dim"), 1600)),
